@@ -613,6 +613,37 @@ func TestClaudeHandoffStateIgnoresRollingCacheMarkersAndSystemNotifications(t *t
 	}
 }
 
+func TestClaudeHandoffBoundaryIncludesSemanticSystemMessages(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{Enabled: true, KeepRecentMessages: 1}}})
+	basePayload := []byte(`{"model":"claude-opus-5-5","messages":[
+{"role":"system","content":"project policy A"},
+{"role":"user","content":"old request"},
+{"role":"user","content":"current request"}]}`)
+	manager.rememberClaudeHandoffSummaryForPayload("semantic-system-session", `{"goal":"continue"}`, basePayload)
+	changed := []byte(`{"model":"claude-opus-5-5","messages":[
+{"role":"system","content":"project policy B"},
+{"role":"user","content":"old request"},
+{"role":"user","content":"current request"}]}`)
+	opts := claudeHandoffOptions()
+	opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = "semantic-system-session"
+	rewritten, _ := manager.applyClaudeHandoffState(cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: changed}, opts, []string{"claude"})
+	if bytes.Contains(rewritten.Payload, []byte(claudeHandoffSummaryTag)) {
+		t.Fatalf("semantic system mutation reused stale handoff summary: %s", rewritten.Payload)
+	}
+	if _, ok := claudeHandoffSummaryFromState(manager, "semantic-system-session"); ok {
+		t.Fatal("semantic system mutation did not invalidate handoff state")
+	}
+}
+
+func TestClaudeHandoffBoundaryIncludesToolInputCacheControl(t *testing.T) {
+	first := gjson.Parse(`{"role":"user","content":[{"type":"tool_use","id":"t1","name":"x","input":{"cache_control":"A"}}]}`)
+	second := gjson.Parse(`{"role":"user","content":[{"type":"tool_use","id":"t1","name":"x","input":{"cache_control":"B"}}]}`)
+	if claudeHandoffMessagesHash([]gjson.Result{first}) == claudeHandoffMessagesHash([]gjson.Result{second}) {
+		t.Fatal("tool input cache_control mutation was ignored by boundary hash")
+	}
+}
+
 func TestApplyClaudeHandoffStateInvalidatesMismatchedBoundary(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{Enabled: true, KeepRecentMessages: 1}}})

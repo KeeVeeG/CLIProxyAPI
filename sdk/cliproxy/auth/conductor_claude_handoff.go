@@ -355,12 +355,6 @@ func (m *Manager) rememberClaudeHandoffSummaryForPayload(sessionID, summary stri
 func claudeHandoffMessagesHash(messages []gjson.Result) string {
 	hash := sha256.New()
 	for _, message := range messages {
-		// System notifications are harness bookkeeping and can be rewritten by
-		// Claude Code between turns. They are dropped from the retained tail,
-		// so they must not invalidate the stable conversation boundary either.
-		if message.Get("role").String() == "system" {
-			continue
-		}
 		_, _ = hash.Write(canonicalizeClaudeHandoffHashMessage(message.Raw))
 		_, _ = hash.Write([]byte{'\n'})
 	}
@@ -371,6 +365,8 @@ func claudeHandoffMessagesHash(messages []gjson.Result) string {
 // before comparing a previously compacted prefix with the next Claude CLI
 // request. Claude Code moves or removes cache_control blocks as the rolling
 // breakpoint advances; those markers do not change the conversation content.
+// Only message/content metadata is stripped. A cache_control field nested in
+// a tool input is user data and must still participate in the boundary hash.
 func canonicalizeClaudeHandoffHashMessage(raw string) []byte {
 	var value any
 	decoder := json.NewDecoder(strings.NewReader(raw))
@@ -387,15 +383,30 @@ func canonicalizeClaudeHandoffHashMessage(raw string) []byte {
 }
 
 func stripClaudeHandoffCacheControls(value any) {
+	message, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+	delete(message, "cache_control")
+	content, ok := message["content"]
+	if !ok {
+		return
+	}
+	stripClaudeHandoffContentCacheControls(content)
+}
+
+func stripClaudeHandoffContentCacheControls(value any) {
 	switch item := value.(type) {
-	case map[string]any:
-		delete(item, "cache_control")
-		for _, child := range item {
-			stripClaudeHandoffCacheControls(child)
-		}
 	case []any:
 		for _, child := range item {
-			stripClaudeHandoffCacheControls(child)
+			stripClaudeHandoffContentCacheControls(child)
+		}
+	case map[string]any:
+		delete(item, "cache_control")
+		// tool_result blocks can contain nested content blocks. Do not recurse
+		// into tool_use.input: cache_control there is part of the tool payload.
+		if nested, ok := item["content"]; ok {
+			stripClaudeHandoffContentCacheControls(nested)
 		}
 	}
 }
