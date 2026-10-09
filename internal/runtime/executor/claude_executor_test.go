@@ -3438,6 +3438,19 @@ func TestNormalizeCacheControlTTLHandlesHandoffSummaryAfterFiveMinutePrefix(t *t
 	}
 }
 
+func TestEnforceClaudeHandoffWirePayloadBudgetChecksFinalBody(t *testing.T) {
+	cfg := &config.Config{Routing: config.RoutingConfig{ClaudeHandoff: config.ClaudeHandoffConfig{Enabled: true, MaxPayloadBytes: 64}}}
+	payload := []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"<cli-proxy-claude-handoff>summary</cli-proxy-claude-handoff>"}]}]}`)
+	if err := enforceClaudeHandoffWirePayloadBudget(cfg, payload); err == nil {
+		t.Fatal("oversized final handoff body was accepted")
+	} else if got := err.(statusErr).StatusCode(); got != http.StatusRequestEntityTooLarge {
+		t.Fatalf("final body status = %d, want %d", got, http.StatusRequestEntityTooLarge)
+	}
+	if err := enforceClaudeHandoffWirePayloadBudget(cfg, []byte(`{"messages":[{"role":"user","content":"literal marker <cli-proxy-claude-handoff>"}]}`)); err != nil {
+		t.Fatalf("literal user marker triggered wire budget: %v", err)
+	}
+}
+
 func TestClaudeExecutor_ExecuteSanitizesSignaturesBeforeUpstream(t *testing.T) {
 	var seenBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

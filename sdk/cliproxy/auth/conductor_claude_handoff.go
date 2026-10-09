@@ -539,7 +539,17 @@ func (m *Manager) applyClaudeHandoffState(req cliproxyexecutor.Request, opts cli
 	opts.Metadata = metadata
 	sessionID := claudeHandoffSessionID(opts)
 	state, ok := claudeHandoffSummaryFromState(m, sessionID)
-	if !ok || isAlreadyClaudeHandoffCompacted(req.Payload) {
+	if !ok {
+		return req, opts
+	}
+	if isAlreadyClaudeHandoffCompacted(req.Payload) {
+		if claudeHandoffPayloadBudgetError(req.Payload, cfg) == nil {
+			return req, opts
+		}
+		// A previously compacted envelope can grow through tools/system and
+		// client-side additions. Let the preparation stage compact this current
+		// envelope again instead of forwarding an oversized request.
+		m.clearClaudeHandoffState(sessionID)
 		return req, opts
 	}
 	// On an idle refresh, let maybeCompactClaudeHandoffHistory see the raw
@@ -605,7 +615,7 @@ func (m *Manager) maybeCompactClaudeHandoffHistory(ctx context.Context, req clip
 	lastRequest, hadLastRequest := m.claudeHandoffLastRequest(sessionID)
 	idle := hadLastRequest && !lastRequest.IsZero() && time.Since(lastRequest) >= claudeHandoffIdleCompactAfter
 	m.rememberClaudeHandoffRequest(sessionID, time.Now())
-	if isAlreadyClaudeHandoffCompacted(req.Payload) && !idle {
+	if isAlreadyClaudeHandoffCompacted(req.Payload) && !idle && claudeHandoffPayloadBudgetError(req.Payload, cfg) == nil {
 		return req, opts, nil
 	}
 	if _, ok := claudeHandoffSummaryFromState(m, sessionID); ok && !idle {
@@ -628,12 +638,28 @@ func (m *Manager) maybeCompactClaudeHandoffHistory(ctx context.Context, req clip
 }
 
 func isAlreadyClaudeHandoffCompacted(payload []byte) bool {
-	if bytes.Contains(payload, []byte(claudeHandoffSummaryTag)) {
-		return true
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() || len(messages.Array()) == 0 || messages.Array()[0].Get("role").String() != "user" {
+		return false
 	}
-	// encoding/json escapes HTML-sensitive delimiters in the synthetic text
-	// block, so detect the canonical escaped representation as well.
-	return bytes.Contains(payload, []byte(`\u003ccli-proxy-claude-handoff\u003e`))
+	content := messages.Array()[0].Get("content")
+	if content.Type == gjson.String {
+		text := content.String()
+		return strings.HasPrefix(text, claudeHandoffSummaryTag) && strings.Contains(text, claudeHandoffSummaryEndTag)
+	}
+	if !content.IsArray() {
+		return false
+	}
+	for _, block := range content.Array() {
+		if block.Get("type").String() != "text" {
+			continue
+		}
+		text := block.Get("text").String()
+		if strings.HasPrefix(text, claudeHandoffSummaryTag) && strings.Contains(text, claudeHandoffSummaryEndTag) {
+			return true
+		}
+	}
+	return false
 }
 
 func buildClaudeHandoffCompactorPayload(original []byte, model string, maxOutputTokens int) ([]byte, error) {

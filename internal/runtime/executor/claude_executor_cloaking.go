@@ -25,6 +25,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const claudeHandoffDefaultMaxPayloadBytes = 4 * 1024 * 1024
+
 func resolveIncomingClaudeHeaders(ctx context.Context, incoming http.Header) http.Header {
 	resolved := make(http.Header)
 	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
@@ -2226,6 +2228,37 @@ func claudeHandoffSummaryCacheBlock(block gjson.Result) bool {
 	text := block.Get("text").String()
 	return strings.Contains(text, "<cli-proxy-claude-handoff>") ||
 		strings.Contains(text, "\\u003ccli-proxy-claude-handoff\\u003e")
+}
+
+func claudeBodyHasHandoffSummary(payload []byte) bool {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() || len(messages.Array()) == 0 || messages.Array()[0].Get("role").String() != "user" {
+		return false
+	}
+	content := messages.Array()[0].Get("content")
+	if !content.IsArray() {
+		return false
+	}
+	for _, block := range content.Array() {
+		if claudeHandoffSummaryCacheBlock(block) {
+			return true
+		}
+	}
+	return false
+}
+
+func enforceClaudeHandoffWirePayloadBudget(cfg *config.Config, payload []byte) error {
+	if cfg == nil || !cfg.Routing.ClaudeHandoff.Enabled || !claudeBodyHasHandoffSummary(payload) {
+		return nil
+	}
+	maxBytes := cfg.Routing.ClaudeHandoff.MaxPayloadBytes
+	if maxBytes <= 0 {
+		maxBytes = claudeHandoffDefaultMaxPayloadBytes
+	}
+	if len(payload) > maxBytes {
+		return statusErr{code: http.StatusRequestEntityTooLarge, msg: fmt.Sprintf("Claude handoff wire payload is %d bytes, above max-payload-bytes=%d after executor transformations", len(payload), maxBytes)}
+	}
+	return nil
 }
 
 // upgradeClaudeHandoffSummaryCacheTTL applies the preferred one-hour TTL used by

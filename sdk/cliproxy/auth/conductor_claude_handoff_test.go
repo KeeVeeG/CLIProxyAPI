@@ -1427,6 +1427,42 @@ func TestMaybeCompactClaudeHandoffHistoryOnFirstRequest(t *testing.T) {
 	}
 }
 
+func TestClaudeHandoffMarkerDetectionRequiresSyntheticFirstUserBlock(t *testing.T) {
+	if isAlreadyClaudeHandoffCompacted([]byte(`{"messages":[{"role":"user","content":"please repeat <cli-proxy-claude-handoff> literally"}]}`)) {
+		t.Fatal("literal marker in a user request was treated as a compacted envelope")
+	}
+	if !isAlreadyClaudeHandoffCompacted([]byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"<cli-proxy-claude-handoff>\nsummary\n</cli-proxy-claude-handoff>"}]}]}`)) {
+		t.Fatal("synthetic handoff summary was not detected")
+	}
+}
+
+func TestMaybeCompactClaudeHandoffHistoryDoesNotSkipOversizedEnvelope(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	compactor := &claudeHandoffPayloadRecordingCompactorExecutor{}
+	manager.RegisterExecutor(compactor)
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
+		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6-luna", MaxPayloadBytes: 512,
+	}}})
+	const authID = "claude-oversized-envelope-compactor-auth"
+	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "gpt-6-luna"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+	if _, err := manager.Register(context.Background(), &Auth{ID: authID, Provider: "codex", Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	largeTools := strings.Repeat("tool-schema ", 200)
+	payload := []byte(`{"model":"claude-opus-5-5","tools":[{"name":"large","description":"` + largeTools + `"}],"messages":[{"role":"user","content":[{"type":"text","text":"<cli-proxy-claude-handoff>\nold\n</cli-proxy-claude-handoff>"}]},{"role":"user","content":"latest"}]}`)
+	_, _, err := manager.maybeCompactClaudeHandoffHistory(context.Background(), cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Metadata:     map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: "oversized-envelope-session"},
+	}, []string{"claude"})
+	if err == nil {
+		t.Fatal("oversized handoff envelope was forwarded without a budget error")
+	}
+	if got := compactor.calls.Load(); got != 1 {
+		t.Fatalf("oversized envelope compactor calls = %d, want one refresh attempt", got)
+	}
+}
+
 func TestMaybeCompactClaudeHandoffHistoryAfterThirtyMinutesIdle(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	compactor := &claudeHandoffPayloadRecordingCompactorExecutor{}
