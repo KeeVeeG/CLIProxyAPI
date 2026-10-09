@@ -287,9 +287,16 @@ func (m *Manager) rememberClaudeHandoffSummaryForPayload(sessionID, summary stri
 	state := claudeHandoffState{Summary: summary, UpdatedAt: time.Now()}
 	messages := gjson.GetBytes(payload, "messages")
 	if messages.IsArray() && len(messages.Array()) > 0 {
+		// Claude Code appends dynamic system notifications after the current
+		// user turn. The handoff boundary belongs immediately before that
+		// latest user turn, so those notifications and the current turn stay
+		// in the retained tail instead of entering the boundary hash.
 		state.BoundaryMessages = len(messages.Array())
-		if messages.Array()[len(messages.Array())-1].Get("role").String() == "user" {
-			state.BoundaryMessages--
+		for index := len(messages.Array()) - 1; index >= 0; index-- {
+			if messages.Array()[index].Get("role").String() == "user" {
+				state.BoundaryMessages = index
+				break
+			}
 		}
 		if state.BoundaryMessages > 0 {
 			state.BoundaryHash = claudeHandoffMessagesHash(messages.Array()[:state.BoundaryMessages])
@@ -306,10 +313,49 @@ func (m *Manager) rememberClaudeHandoffSummaryForPayload(sessionID, summary stri
 func claudeHandoffMessagesHash(messages []gjson.Result) string {
 	hash := sha256.New()
 	for _, message := range messages {
-		_, _ = hash.Write([]byte(message.Raw))
+		// System notifications are harness bookkeeping and can be rewritten by
+		// Claude Code between turns. They are dropped from the retained tail,
+		// so they must not invalidate the stable conversation boundary either.
+		if message.Get("role").String() == "system" {
+			continue
+		}
+		_, _ = hash.Write(canonicalizeClaudeHandoffHashMessage(message.Raw))
 		_, _ = hash.Write([]byte{'\n'})
 	}
 	return fmt.Sprintf("%x", hash.Sum(nil))
+}
+
+// canonicalizeClaudeHandoffHashMessage removes rolling prompt-cache markers
+// before comparing a previously compacted prefix with the next Claude CLI
+// request. Claude Code moves or removes cache_control blocks as the rolling
+// breakpoint advances; those markers do not change the conversation content.
+func canonicalizeClaudeHandoffHashMessage(raw string) []byte {
+	var value any
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&value); err != nil {
+		return []byte(raw)
+	}
+	stripClaudeHandoffCacheControls(value)
+	canonical, err := json.Marshal(value)
+	if err != nil {
+		return []byte(raw)
+	}
+	return canonical
+}
+
+func stripClaudeHandoffCacheControls(value any) {
+	switch item := value.(type) {
+	case map[string]any:
+		delete(item, "cache_control")
+		for _, child := range item {
+			stripClaudeHandoffCacheControls(child)
+		}
+	case []any:
+		for _, child := range item {
+			stripClaudeHandoffCacheControls(child)
+		}
+	}
 }
 
 func isClaudeHandoffCandidate(provider string, opts cliproxyexecutor.Options, err error) bool {
@@ -1044,8 +1090,9 @@ func rewriteClaudeHandoffPayloadWithTail(payload []byte, summary string, tail []
 	claudeHandoffUser, _ := json.Marshal(map[string]any{
 		"role": "user",
 		"content": []map[string]any{{
-			"type": "text",
-			"text": claudeHandoffSummaryTag + "\n" + summary + "\n" + claudeHandoffSummaryEndTag,
+			"type":          "text",
+			"text":          claudeHandoffSummaryTag + "\n" + summary + "\n" + claudeHandoffSummaryEndTag,
+			"cache_control": map[string]string{"type": "ephemeral"},
 		}},
 	})
 	items := make([]string, 0, len(tail)+2)

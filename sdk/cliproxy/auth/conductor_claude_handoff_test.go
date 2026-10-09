@@ -385,6 +385,9 @@ func TestRewriteClaudeHandoffPayloadPreservesEnvelopeAndDoesNotMutateInput(t *te
 	if !strings.Contains(messages[0].Get("content.0.text").String(), claudeHandoffSummaryTag) || !strings.Contains(messages[0].Get("content.0.text").String(), "run tests") {
 		t.Fatalf("summary marker/content missing from first message: %s", messages[0].Raw)
 	}
+	if got := messages[0].Get("content.0.cache_control.type").String(); got != "ephemeral" {
+		t.Fatalf("summary cache breakpoint = %q, want ephemeral", got)
+	}
 	if messages[len(messages)-1].Get("role").String() != "user" {
 		t.Fatalf("rewritten request ended with role %q, want user", messages[len(messages)-1].Get("role").String())
 	}
@@ -540,6 +543,53 @@ func TestClaudeHandoffStateKeepsTurnsAddedAfterBoundary(t *testing.T) {
 	}
 	if strings.Contains(text, "old request") || strings.Contains(text, "old answer") {
 		t.Fatalf("pre-boundary transcript leaked into rewritten payload: %s", text)
+	}
+}
+
+func TestClaudeHandoffStateIgnoresRollingCacheMarkersAndSystemNotifications(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{Enabled: true, KeepRecentMessages: 1}}})
+	basePayload := []byte(`{"model":"claude-opus-5-5","messages":[
+{"role":"user","content":"before"},
+{"role":"assistant","content":[{"type":"text","text":"answer","cache_control":{"type":"ephemeral"}}]},
+{"role":"user","content":"boundary"},
+{"role":"system","content":[{"type":"text","text":"old notification","cache_control":{"type":"ephemeral"}}]}
+]}`)
+	manager.rememberClaudeHandoffSummaryForPayload("session-test", `{"goal":"continue"}`, basePayload)
+
+	// Claude Code removes the old rolling marker, changes the current user
+	// block as it appends system notifications, and rewrites trailing system
+	// messages between requests. None of that should invalidate the boundary.
+	nextPayload := []byte(`{"model":"claude-opus-5-5","messages":[
+{"role":"user","content":"before"},
+{"role":"assistant","content":[{"type":"text","text":"answer"}]},
+{"role":"user","content":"boundary\n<SYSTEM NOTIFICATION>new background event</SYSTEM NOTIFICATION>"},
+{"role":"system","content":"new notification"},
+{"role":"assistant","content":"post-boundary answer"},
+{"role":"user","content":"new request"},
+{"role":"assistant","content":"second answer"},
+{"role":"user","content":"follow-up"},
+{"role":"system","content":"latest notification"}
+]}`)
+	rewritten, _ := manager.applyClaudeHandoffState(cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: nextPayload}, claudeHandoffOptions(), []string{"claude"})
+	if err := json.Unmarshal(rewritten.Payload, &map[string]any{}); err != nil {
+		t.Fatalf("rewritten payload is invalid JSON: %v", err)
+	}
+	text := string(rewritten.Payload)
+	for _, want := range []string{"boundary", "post-boundary answer", "new request", "second answer", "follow-up"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("post-boundary turn %q was lost: %s", want, text)
+		}
+	}
+	if strings.Contains(text, `"text":"before"`) || strings.Contains(text, `"text":"answer"`) {
+		t.Fatalf("pre-boundary transcript leaked into rewritten payload: %s", text)
+	}
+	messages := gjson.GetBytes(rewritten.Payload, "messages").Array()
+	if len(messages) != 6 {
+		t.Fatalf("rewritten message count = %d, want summary plus five retained user/assistant turns", len(messages))
+	}
+	if messages[len(messages)-1].Get("role").String() != "user" {
+		t.Fatalf("rewritten request ended with role %q, want user", messages[len(messages)-1].Get("role").String())
 	}
 }
 
