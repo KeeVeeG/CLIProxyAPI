@@ -53,20 +53,19 @@ func TestClaudeHandoffRewriteAppliesConfiguredTailBudget(t *testing.T) {
 	payload := []byte(`{"model":"claude-opus-5-5","messages":[
 {"role":"user","content":"old-1"},
 {"role":"assistant","content":"old-2"},
-{"role":"user","content":"latest-"}` + strings.Repeat("z", 600) + `"}]}`)
+{"role":"user","content":"latest-` + strings.Repeat("z", 600) + `"}]}`)
 	rewritten, err := rewriteClaudeHandoffPayloadBudget(payload, `{"goal":"continue"}`, 8, 128)
 	if err != nil {
 		t.Fatalf("rewriteClaudeHandoffPayloadBudget() error = %v", err)
 	}
 	messages := gjson.GetBytes(rewritten, "messages").Array()
-	t.Logf("rewritten=%s", rewritten)
 	if len(messages) != 2 {
 		t.Fatalf("rewritten messages = %d, want summary plus continuation after oversized tail: %s", len(messages), rewritten)
 	}
 	if messages[0].Get("role").String() != "user" || messages[1].Get("role").String() != "user" {
 		t.Fatalf("rewritten roles = %q,%q, want user,user", messages[0].Get("role").String(), messages[1].Get("role").String())
 	}
-	if strings.Contains(string(rewritten), "latest-") {
+	if strings.Contains(string(rewritten), "latest-") || strings.Contains(string(rewritten), strings.Repeat("z", 32)) {
 		t.Fatalf("oversized post-summary message was retained: %s", rewritten)
 	}
 }
