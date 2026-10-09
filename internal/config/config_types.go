@@ -406,6 +406,10 @@ type ClaudeHandoffConfig struct {
 	// that fit this budget, so a growing session cannot reintroduce an unbounded
 	// prompt between compactions. A non-positive value uses the built-in default.
 	MaxTailBytes int `yaml:"max-tail-bytes,omitempty" json:"max-tail-bytes,omitempty"`
+	// MaxPayloadBytes bounds the complete rewritten Claude request, including
+	// system instructions and tool schemas that must remain available to Claude.
+	// A non-positive value uses the built-in default.
+	MaxPayloadBytes int `yaml:"max-payload-bytes,omitempty" json:"max-payload-bytes,omitempty"`
 	// FailOpen allows the original request to continue through normal credential
 	// failover when compaction fails. The safe default is false.
 	FailOpen bool `yaml:"fail-open,omitempty" json:"fail-open,omitempty"`

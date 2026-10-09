@@ -34,9 +34,12 @@ const (
 	// the live transcript so a long-running session cannot grow back to the
 	// original hundreds of thousands of tokens between handoffs.
 	claudeHandoffDefaultMaxTailBytes = 128 * 1024
-	claudeHandoffSummaryTag          = "<cli-proxy-claude-handoff>"
-	claudeHandoffSummaryEndTag       = "</cli-proxy-claude-handoff>"
-	claudeHandoffIdleCompactAfter    = 30 * time.Minute
+	// Keep a hard byte ceiling for the complete rewritten request while leaving
+	// the original system/tools envelope intact for Claude tool execution.
+	claudeHandoffDefaultMaxPayloadBytes = 4 * 1024 * 1024
+	claudeHandoffSummaryTag             = "<cli-proxy-claude-handoff>"
+	claudeHandoffSummaryEndTag          = "</cli-proxy-claude-handoff>"
+	claudeHandoffIdleCompactAfter       = 30 * time.Minute
 )
 
 type claudeHandoffCompactionLimiterKey struct{}
@@ -165,7 +168,17 @@ func claudeHandoffConfig(cfg *internalconfig.Config) internalconfig.ClaudeHandof
 	if out.MaxTailBytes <= 0 {
 		out.MaxTailBytes = claudeHandoffDefaultMaxTailBytes
 	}
+	if out.MaxPayloadBytes <= 0 {
+		out.MaxPayloadBytes = claudeHandoffDefaultMaxPayloadBytes
+	}
 	return out
+}
+
+func claudeHandoffPayloadBudgetError(payload []byte, cfg internalconfig.ClaudeHandoffConfig) error {
+	if cfg.MaxPayloadBytes > 0 && len(payload) > cfg.MaxPayloadBytes {
+		return fmt.Errorf("rewritten Claude handoff payload is %d bytes, above max-payload-bytes=%d", len(payload), cfg.MaxPayloadBytes)
+	}
+	return nil
 }
 
 func claudeHandoffInternal(opts cliproxyexecutor.Options) bool {
@@ -547,6 +560,10 @@ func (m *Manager) applyClaudeHandoffState(req cliproxyexecutor.Request, opts cli
 		}
 		return req, opts
 	}
+	if claudeHandoffPayloadBudgetError(rewritten, cfg) != nil {
+		m.clearClaudeHandoffState(sessionID)
+		return req, opts
+	}
 	req.Payload = rewritten
 	opts.OriginalRequest = bytes.Clone(rewritten)
 	return req, opts
@@ -711,9 +728,19 @@ func sanitizeClaudeHandoffCompactorValue(value any) any {
 				return nil
 			}
 		}
-		delete(item, "signature")
-		delete(item, "cache_control")
+		// These fields are provider metadata only on a message/content block.
+		// Do not delete same-named user data nested in tool_use.input.
+		if _, hasRole := item["role"]; hasRole {
+			delete(item, "signature")
+			delete(item, "cache_control")
+		} else if typeName, hasType := item["type"].(string); hasType && claudeHandoffProviderBlockType(typeName) {
+			delete(item, "signature")
+			delete(item, "cache_control")
+		}
 		for key, child := range item {
+			if key == "input" {
+				continue
+			}
 			item[key] = sanitizeClaudeHandoffCompactorValue(child)
 		}
 		return item
@@ -728,6 +755,15 @@ func sanitizeClaudeHandoffCompactorValue(value any) any {
 		return out
 	default:
 		return value
+	}
+}
+
+func claudeHandoffProviderBlockType(typeName string) bool {
+	switch strings.ToLower(strings.TrimSpace(typeName)) {
+	case "text", "image", "document", "thinking", "redacted_thinking", "tool_use", "tool_result", "server_tool_use", "web_search_tool_result":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1146,6 +1182,9 @@ func (m *Manager) performClaudeHandoffFresh(ctx context.Context, req cliproxyexe
 			if errRewrite != nil {
 				return nil, fmt.Errorf("rewrite refreshed Claude request after compaction: %w", errRewrite)
 			}
+			if errBudget := claudeHandoffPayloadBudgetError(rewritten, cfg); errBudget != nil {
+				return nil, errBudget
+			}
 			// If payload is already a handoff envelope, preserve the original
 			// transcript boundary. The client will send the full Claude
 			// transcript again on its next turn; hashing this synthetic envelope
@@ -1175,7 +1214,15 @@ func (m *Manager) performClaudeHandoffFresh(ctx context.Context, req cliproxyexe
 			if errRewrite != nil {
 				return nil, fmt.Errorf("rewrite Claude request after boundary mismatch: %w", errRewrite)
 			}
+			if errBudget := claudeHandoffPayloadBudgetError(rewritten, cfg); errBudget != nil {
+				return nil, errBudget
+			}
 			m.rememberClaudeHandoffSummaryForPayload(sessionID, summary, payload)
+		}
+		if errRewrite == nil {
+			if errBudget := claudeHandoffPayloadBudgetError(rewritten, cfg); errBudget != nil {
+				return nil, errBudget
+			}
 		}
 		return rewritten, errRewrite
 	}
@@ -1196,6 +1243,9 @@ func (m *Manager) performClaudeHandoffFresh(ctx context.Context, req cliproxyexe
 	rewritten, errRewrite := rewriteClaudeHandoffPayloadBudget(original, summary, cfg.KeepRecentMessages, cfg.MaxTailBytes)
 	if errRewrite != nil {
 		return nil, fmt.Errorf("rewrite Claude request after compaction: %w", errRewrite)
+	}
+	if errBudget := claudeHandoffPayloadBudgetError(rewritten, cfg); errBudget != nil {
+		return nil, errBudget
 	}
 	m.rememberClaudeHandoffSummaryForPayload(sessionID, summary, original)
 	return rewritten, nil

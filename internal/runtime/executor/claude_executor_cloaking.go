@@ -2228,10 +2228,12 @@ func claudeHandoffSummaryCacheBlock(block gjson.Result) bool {
 		strings.Contains(text, "\\u003ccli-proxy-claude-handoff\\u003e")
 }
 
-// upgradeClaudeHandoffSummaryCacheTTL applies the same one-hour TTL used by
+// upgradeClaudeHandoffSummaryCacheTTL applies the preferred one-hour TTL used by
 // native Claude OAuth requests to the synthetic handoff marker. Native CLI
 // requests bypass CPA-owned marker placement, so the generic TTL upgrade would
-// otherwise leave this new prefix at the bare five-minute default.
+// otherwise leave this new prefix at the bare five-minute default. The later
+// normalizeCacheControlTTL pass may intentionally downgrade it when an earlier
+// tools/system breakpoint is five-minute, preserving Anthropic's ordering rule.
 func upgradeClaudeHandoffSummaryCacheTTL(payload []byte, ttl string) []byte {
 	if ttl == "" || len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return payload

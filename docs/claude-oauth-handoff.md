@@ -28,6 +28,7 @@ routing:
     keep-recent-messages: 8
     max-summary-bytes: 262144
     max-tail-bytes: 131072
+    max-payload-bytes: 4194304
     fail-open: false
 ```
 

@@ -75,4 +75,17 @@ func TestClaudeHandoffTailBudgetDefaultIsBounded(t *testing.T) {
 	if cfg.MaxTailBytes != claudeHandoffDefaultMaxTailBytes {
 		t.Fatalf("default max tail bytes = %d, want %d", cfg.MaxTailBytes, claudeHandoffDefaultMaxTailBytes)
 	}
+	if cfg.MaxPayloadBytes != claudeHandoffDefaultMaxPayloadBytes {
+		t.Fatalf("default max payload bytes = %d, want %d", cfg.MaxPayloadBytes, claudeHandoffDefaultMaxPayloadBytes)
+	}
+}
+
+func TestClaudeHandoffPayloadBudgetCoversSystemAndToolsEnvelope(t *testing.T) {
+	cfg := claudeHandoffConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{MaxPayloadBytes: 128}}})
+	if err := claudeHandoffPayloadBudgetError([]byte(strings.Repeat("x", 129)), cfg); err == nil {
+		t.Fatal("oversized complete handoff payload was accepted")
+	}
+	if err := claudeHandoffPayloadBudgetError([]byte(strings.Repeat("x", 128)), cfg); err != nil {
+		t.Fatalf("payload at configured limit was rejected: %v", err)
+	}
 }

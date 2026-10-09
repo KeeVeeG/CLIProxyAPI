@@ -192,6 +192,8 @@ routing:
     # Bounds the retained post-summary Claude transcript. Complete messages
     # are kept from the end until this byte budget is reached.
     max-tail-bytes: 131072
+    # Hard limit for the complete rewritten request, including system/tools.
+    max-payload-bytes: 4194304
     fail-open: false
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).

@@ -1042,6 +1042,60 @@ func TestClaudeExecutor_NativeOAuthHandoffSummaryKeepsBreakpointAndOneHourTTL(t 
 	}
 }
 
+func TestClaudeExecutorStream_NativeOAuthHandoffSummaryWireBody(t *testing.T) {
+	var seenBody []byte
+	var seenHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenBody, _ = io.ReadAll(r.Body)
+		seenHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer server.Close()
+
+	const sessionID = "11111111-2222-4333-8444-555555555555"
+	incoming := http.Header{
+		"User-Agent":               {"claude-cli/2.1.280 (external, cli)"},
+		"X-App":                    {"cli"},
+		"Anthropic-Beta":           {"claude-code-20250219"},
+		"X-Claude-Code-Session-Id": {sessionID},
+	}
+	payload := []byte(`{"model":"claude-opus-5-5","messages":[
+{"role":"user","content":[{"type":"text","text":"<cli-proxy-claude-handoff>summary</cli-proxy-claude-handoff>","cache_control":{"type":"ephemeral"}}]},
+{"role":"user","content":"current"}],"stream":true}`)
+	auth := &cliproxyauth.Auth{ID: "native-handoff-stream-oauth", Metadata: claudeOAuthTestMetadata(), Attributes: map[string]string{
+		"api_key": "sk-ant-oat-native-handoff-stream", "base_url": server.URL,
+	}}
+	executor := NewClaudeExecutor(&config.Config{})
+	result, err := executor.ExecuteStream(context.Background(), auth, cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload, Headers: incoming, Stream: true,
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	for chunk := range result.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+	}
+	if got := countCacheControls(seenBody); got > 4 {
+		t.Fatalf("stream wire cache breakpoints = %d, want <= 4: %s", got, seenBody)
+	}
+	var summaryTTL string
+	for _, block := range gjson.GetBytes(seenBody, "messages.0.content").Array() {
+		if strings.Contains(block.Get("text").String(), "<cli-proxy-claude-handoff>") {
+			summaryTTL = block.Get("cache_control.ttl").String()
+			break
+		}
+	}
+	if summaryTTL != "1h" {
+		t.Fatalf("stream handoff summary ttl = %q, want 1h: %s", summaryTTL, seenBody)
+	}
+	if !strings.Contains(seenHeaders.Get("Anthropic-Beta"), claudeExtendedCacheTTLBeta) {
+		t.Fatalf("stream wire betas = %q, want %s", seenHeaders.Get("Anthropic-Beta"), claudeExtendedCacheTTLBeta)
+	}
+}
+
 func TestClaudeExecutor_ConfirmedCLIForwardsNativeOpus55Shape(t *testing.T) {
 	var seenBody []byte
 	var seenHeaders http.Header
@@ -3358,6 +3412,9 @@ func TestEnforceCacheControlLimitPreservesClaudeHandoffSummary(t *testing.T) {
 	if !gjson.GetBytes(out, "messages.0.content.0.cache_control").Exists() {
 		t.Fatalf("handoff summary breakpoint was removed: %s", out)
 	}
+	if !gjson.GetBytes(out, "messages.4.content.0.cache_control").Exists() {
+		t.Fatalf("newest rolling breakpoint was removed: %s", out)
+	}
 }
 
 func TestUpgradeClaudeHandoffSummaryCacheTTL(t *testing.T) {
@@ -3370,6 +3427,14 @@ func TestUpgradeClaudeHandoffSummaryCacheTTL(t *testing.T) {
 	}
 	if gjson.GetBytes(out, "messages.1.content.0.cache_control.ttl").Exists() {
 		t.Fatalf("unrelated rolling marker was modified: %s", out)
+	}
+}
+
+func TestNormalizeCacheControlTTLHandlesHandoffSummaryAfterFiveMinutePrefix(t *testing.T) {
+	payload := []byte(`{"system":[{"type":"text","text":"native","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":[{"type":"text","text":"<cli-proxy-claude-handoff>summary</cli-proxy-claude-handoff>","cache_control":{"type":"ephemeral","ttl":"1h"}}]}]}`)
+	out := normalizeCacheControlTTL(payload)
+	if gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").Exists() {
+		t.Fatalf("summary retained invalid 1h ttl after an earlier bare marker: %s", out)
 	}
 }
 

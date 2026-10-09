@@ -153,7 +153,7 @@ func TestClaudeHandoffCompactorPayloadDropsRequestToolSchemas(t *testing.T) {
 }
 
 func TestClaudeHandoffCompactorPayloadRemovesMediaAndSignatures(t *testing.T) {
-	payload := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"private"},{"type":"text","text":"visible","signature":"large-signature"},{"type":"tool_result","tool_use_id":"tool-1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + strings.Repeat("A", 10000) + `"}}]}]}]}`)
+	payload := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"private"},{"type":"text","text":"visible","signature":"large-signature"},{"type":"tool_use","id":"tool-1","name":"read","input":{"signature":"user-signature","cache_control":"user-data"}},{"type":"tool_result","tool_use_id":"tool-1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + strings.Repeat("A", 10000) + `"}}]}]}]}`)
 	compactorPayload, err := claudeHandoffCompactorPayload(payload)
 	if err != nil {
 		t.Fatalf("claudeHandoffCompactorPayload() error = %v", err)
@@ -166,6 +166,9 @@ func TestClaudeHandoffCompactorPayloadRemovesMediaAndSignatures(t *testing.T) {
 	}
 	if !bytes.Contains(compactorPayload, []byte("image omitted from handoff compaction")) {
 		t.Fatalf("image placeholder missing: %s", compactorPayload)
+	}
+	if gjson.GetBytes(compactorPayload, "messages.0.content.1.input.signature").String() != "user-signature" || gjson.GetBytes(compactorPayload, "messages.0.content.1.input.cache_control").String() != "user-data" {
+		t.Fatalf("tool input data was stripped from compactor payload: %s", compactorPayload)
 	}
 }
 
