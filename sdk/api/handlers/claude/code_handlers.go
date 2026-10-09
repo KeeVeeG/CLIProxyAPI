@@ -251,6 +251,9 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 	for {
 		select {
 		case <-c.Request.Context().Done():
+			if h.writePendingStreamErrorOnCancellation(c, errChan, func(err error) { cliCancel(err) }) {
+				return
+			}
 			cliCancel(c.Request.Context().Err())
 			return
 		case errMsg, ok := <-errChan:
@@ -300,6 +303,27 @@ func (h *ClaudeCodeAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON [
 			h.forwardClaudeStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan)
 			return
 		}
+	}
+}
+
+// writePendingStreamErrorOnCancellation gives an already-produced upstream
+// error precedence over the request cancellation branch. Without this small
+// drain, a simultaneous c.Request.Context().Done() and errChan readiness can
+// return before WriteErrorResponse commits the actual status, leaving Gin's
+// default HTTP 200 in the request log for a terminal 499.
+func (h *ClaudeCodeAPIHandler) writePendingStreamErrorOnCancellation(c *gin.Context, errChan <-chan *interfaces.ErrorMessage, cancel func(error)) bool {
+	select {
+	case errMsg, ok := <-errChan:
+		if !ok || errMsg == nil {
+			return false
+		}
+		h.WriteErrorResponse(c, errMsg)
+		if cancel != nil {
+			cancel(errMsg.Error)
+		}
+		return true
+	default:
+		return false
 	}
 }
 

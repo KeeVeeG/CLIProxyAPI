@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/clienterror"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
@@ -297,5 +299,31 @@ func TestPendingClaudeStreamErrorUsesBufferedError(t *testing.T) {
 	}
 	if gotErr != wantErr {
 		t.Fatalf("pending error = %p, want %p", gotErr, wantErr)
+	}
+}
+
+func TestClaudePendingStreamErrorWinsOverCancellation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	request := httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	ctx, cancelRequest := context.WithCancel(request.Context())
+	cancelRequest()
+	c.Request = request.WithContext(ctx)
+
+	errMsg := &interfaces.ErrorMessage{StatusCode: clienterror.StatusClientClosedRequest, Error: context.Canceled}
+	errChan := make(chan *interfaces.ErrorMessage, 1)
+	errChan <- errMsg
+	close(errChan)
+	var canceled error
+	handler := &ClaudeCodeAPIHandler{}
+	if !handler.writePendingStreamErrorOnCancellation(c, errChan, func(err error) { canceled = err }) {
+		t.Fatal("pending stream error was not selected")
+	}
+	if recorder.Code != clienterror.StatusClientClosedRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, clienterror.StatusClientClosedRequest)
+	}
+	if !errors.Is(canceled, context.Canceled) {
+		t.Fatalf("cancellation callback error = %v, want context.Canceled", canceled)
 	}
 }
