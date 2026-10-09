@@ -34,6 +34,91 @@ func claudeQuotaError(message string, status int) error {
 	}
 }
 
+func TestSplitClaudeHandoffPayloadKeepsChunksBelowCompactorLimit(t *testing.T) {
+	var messages []map[string]any
+	for index := 0; index < 5; index++ {
+		messages = append(messages, map[string]any{
+			"role":    "user",
+			"content": strings.Repeat(fmt.Sprintf("message-%d ", index), 18000),
+		})
+	}
+	payload, err := json.Marshal(map[string]any{"model": "claude-opus-5-5", "messages": messages})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	chunks, err := splitClaudeHandoffPayload(payload, 128*1024)
+	if err != nil {
+		t.Fatalf("splitClaudeHandoffPayload() error = %v", err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %d, want at least 2", len(chunks))
+	}
+	for index, chunk := range chunks {
+		if len(chunk) > 128*1024 {
+			t.Fatalf("chunk %d has %d bytes, want <= %d", index, len(chunk), 128*1024)
+		}
+		if !gjson.GetBytes(chunk, "messages").IsArray() {
+			t.Fatalf("chunk %d has invalid messages payload: %s", index, chunk)
+		}
+	}
+}
+
+type claudeHandoffContextRotationExecutor struct {
+	calls atomic.Int32
+}
+
+func (*claudeHandoffContextRotationExecutor) Identifier() string { return "codex" }
+func (*claudeHandoffContextRotationExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+func (*claudeHandoffContextRotationExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
+}
+func (*claudeHandoffContextRotationExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
+}
+func (*claudeHandoffContextRotationExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
+}
+func (e *claudeHandoffContextRotationExecutor) Execute(_ context.Context, auth *Auth, _ cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.calls.Add(1)
+	if auth.ID == "codex-a" {
+		return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusBadRequest, Code: "context_too_large", Message: "input exceeds context window"}
+	}
+	return cliproxyexecutor.Response{Payload: []byte(`{"output":[{"content":[{"text":"{\"goal\":\"continue\"}"}]}]}`)}, nil
+}
+
+func TestClaudeHandoffCompactorRotatesPastContextTooLargeAccount(t *testing.T) {
+	manager := NewManager(nil, claudeHandoffFlowSelector{}, nil)
+	executor := &claudeHandoffContextRotationExecutor{}
+	manager.RegisterExecutor(executor)
+	manager.SetRetryConfig(0, 1, 0)
+	const model = "gpt-6.1-sol"
+	for _, id := range []string{"codex-a", "codex-b"} {
+		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
+		entryID := id
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(entryID) })
+		if _, err := manager.Register(context.Background(), &Auth{ID: id, Provider: "codex", Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}); err != nil {
+			t.Fatalf("Register(%s) error = %v", id, err)
+		}
+	}
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
+		Enabled: true, CompactorProvider: "codex", CompactorModel: model, CompactorRetryMaxInterval: 1,
+	}}})
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	summary, err := manager.compactClaudeHandoffContext(ctx, []byte(`{"messages":[{"role":"user","content":"small"}]}`), claudeHandoffOptions(), claudeHandoffConfig(manager.runtimeConfigSnapshot()))
+	if err != nil {
+		t.Fatalf("compactClaudeHandoffContext() error = %v", err)
+	}
+	if summary != `{"goal":"continue"}` {
+		t.Fatalf("summary = %q", summary)
+	}
+	if got := executor.calls.Load(); got != 2 {
+		t.Fatalf("compactor calls = %d, want both codex credentials", got)
+	}
+}
+
 func TestIsClaudeHandoffCandidateRequiresExactQuotaSignal(t *testing.T) {
 	const quotaMessage = "This request would exceed your account's rate limit. Please try again later."
 	tests := []struct {

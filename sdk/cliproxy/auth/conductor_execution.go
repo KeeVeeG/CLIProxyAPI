@@ -138,6 +138,13 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	// Internal Claude handoff compaction must be allowed to try every OAuth
+	// credential for the compactor model. A normal max-retry-credentials cap is
+	// useful for user traffic, but letting it stop after one account can route a
+	// known temporary quota failure into the public model-fallback plugin.
+	if claudeHandoffInternal(opts) {
+		maxRetryCredentials = 0
+	}
 
 	var lastErr error
 	var preferredUpstreamErr error
@@ -667,6 +674,14 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 					}
 					continue
 				}
+				// A compactor account may reject a large request even though the
+				// transcript can be compacted successfully by another account (or
+				// by the chunked path). Rotate through all compactor credentials
+				// before surfacing context_too_large to the chunk splitter.
+				if claudeHandoffInternal(execOpts) && claudeHandoffContextTooLarge(errExec) {
+					authErr = errExec
+					break
+				}
 				if isResponsesCompactRequestFaultError(execOpts, errExec) || isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
 				}
@@ -716,7 +731,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				}
 				continue
 			}
-			if isResponsesCompactRequestFaultError(opts, authErr) || isRequestInvalidError(authErr) {
+			if (isResponsesCompactRequestFaultError(opts, authErr) || isRequestInvalidError(authErr)) && !(claudeHandoffInternal(opts) && claudeHandoffContextTooLarge(authErr)) {
 				return cliproxyexecutor.Response{}, authErr
 			}
 			lastErr = authErr

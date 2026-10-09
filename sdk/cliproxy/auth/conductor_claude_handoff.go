@@ -22,9 +22,12 @@ import (
 const (
 	claudeHandoffInternalMetadataKey  = "cliproxy.claude_handoff.internal"
 	claudeHandoffCompactedMetadataKey = "cliproxy.claude_handoff.compacted"
-	claudeHandoffSummaryTag           = "<cli-proxy-claude-handoff>"
-	claudeHandoffSummaryEndTag        = "</cli-proxy-claude-handoff>"
-	claudeHandoffIdleCompactAfter     = 30 * time.Minute
+	// Keep compactor input conservative. The full Claude transcript is embedded
+	// in one input_text item and JSON escaping adds overhead before tokenization.
+	claudeHandoffCompactorChunkBytes = 512 * 1024
+	claudeHandoffSummaryTag          = "<cli-proxy-claude-handoff>"
+	claudeHandoffSummaryEndTag       = "</cli-proxy-claude-handoff>"
+	claudeHandoffIdleCompactAfter    = 30 * time.Minute
 )
 
 type claudeHandoffState struct {
@@ -422,6 +425,119 @@ func buildClaudeHandoffCompactorPayload(original []byte, model string, maxOutput
 	return json.Marshal(body)
 }
 
+func claudeHandoffContextTooLarge(err error) bool {
+	if err == nil || statusCodeFromError(err) != http.StatusBadRequest {
+		return false
+	}
+	var authErr *Error
+	if errors.As(err, &authErr) && authErr != nil {
+		code := strings.ToLower(strings.TrimSpace(authErr.Code))
+		if code == "context_too_large" || code == "context_length_exceeded" {
+			return true
+		}
+	}
+	body := strings.ToLower(extractErrorBody(err))
+	return strings.Contains(body, "context_too_large") ||
+		strings.Contains(body, "context_length_exceeded") ||
+		(strings.Contains(body, "context window") && strings.Contains(body, "exceed"))
+}
+
+func claudeHandoffPayloadWithMessages(payload []byte, messages []json.RawMessage) ([]byte, error) {
+	base, err := json.Marshal(messages)
+	if err != nil {
+		return nil, err
+	}
+	return sjson.SetRawBytes(payload, "messages", base)
+}
+
+// splitClaudeHandoffPayload keeps complete messages together so tool-use and
+// tool-result pairs remain understandable to the compactor. A single enormous
+// message is represented by user-text fragments as a last resort; dropping a
+// tool result would lose more context than this conservative representation.
+func splitClaudeHandoffPayload(payload []byte, maxBytes int) ([][]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = claudeHandoffCompactorChunkBytes
+	}
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() || len(messages.Array()) == 0 {
+		return nil, fmt.Errorf("Claude handoff requires messages array")
+	}
+	if len(payload) <= maxBytes {
+		return [][]byte{bytes.Clone(payload)}, nil
+	}
+	rawMessages := make([]json.RawMessage, 0, len(messages.Array()))
+	for _, item := range messages.Array() {
+		rawMessages = append(rawMessages, json.RawMessage(item.Raw))
+	}
+	chunks := make([][]byte, 0, len(rawMessages))
+	current := make([]json.RawMessage, 0, 8)
+	flush := func() error {
+		if len(current) == 0 {
+			return nil
+		}
+		chunk, err := claudeHandoffPayloadWithMessages(payload, current)
+		if err != nil {
+			return err
+		}
+		chunks = append(chunks, chunk)
+		current = nil
+		return nil
+	}
+	for _, message := range rawMessages {
+		candidate := append(append([]json.RawMessage(nil), current...), message)
+		chunk, err := claudeHandoffPayloadWithMessages(payload, candidate)
+		if err != nil {
+			return nil, err
+		}
+		if len(chunk) <= maxBytes {
+			current = candidate
+			continue
+		}
+		if err := flush(); err != nil {
+			return nil, err
+		}
+		single, err := claudeHandoffPayloadWithMessages(payload, []json.RawMessage{message})
+		if err != nil {
+			return nil, err
+		}
+		if len(single) <= maxBytes {
+			current = []json.RawMessage{message}
+			continue
+		}
+		// Split a giant message's JSON representation into valid synthetic
+		// messages. The compactor is instructed to preserve concrete facts, so
+		// retaining every fragment is safer than truncating it.
+		fragmentBytes := maxBytes / 2
+		if fragmentBytes < 4096 {
+			fragmentBytes = 4096
+		}
+		raw := string(message)
+		for start, part := 0, 1; start < len(raw); part++ {
+			end := start + fragmentBytes
+			if end > len(raw) {
+				end = len(raw)
+			}
+			fragment, _ := json.Marshal(map[string]any{
+				"role":    "user",
+				"content": fmt.Sprintf("Original Claude message fragment %d:\n%s", part, raw[start:end]),
+			})
+			fragmentPayload, err := claudeHandoffPayloadWithMessages(payload, []json.RawMessage{fragment})
+			if err != nil {
+				return nil, err
+			}
+			chunks = append(chunks, fragmentPayload)
+			start = end
+		}
+	}
+	if err := flush(); err != nil {
+		return nil, err
+	}
+	if len(chunks) == 0 {
+		return nil, fmt.Errorf("Claude handoff compactor produced no chunks")
+	}
+	return chunks, nil
+}
+
 func extractClaudeHandoffCompactorText(payload []byte) string {
 	var parts []string
 	for _, item := range gjson.GetBytes(payload, "output").Array() {
@@ -451,6 +567,33 @@ func normalizeClaudeHandoffCompactorText(text string) string {
 }
 
 func (m *Manager) compactClaudeHandoffContext(ctx context.Context, original []byte, opts cliproxyexecutor.Options, cfg internalconfig.ClaudeHandoffConfig) (string, error) {
+	return m.compactClaudeHandoffContextWithLimit(ctx, original, opts, cfg, claudeHandoffCompactorChunkBytes, 0)
+}
+
+func (m *Manager) compactClaudeHandoffContextWithLimit(ctx context.Context, original []byte, opts cliproxyexecutor.Options, cfg internalconfig.ClaudeHandoffConfig, maxBytes, depth int) (string, error) {
+	chunks, err := splitClaudeHandoffPayload(original, maxBytes)
+	if err != nil {
+		return "", err
+	}
+	summaries := make([]string, 0, len(chunks))
+	for _, chunk := range chunks {
+		summary, errCompact := m.compactClaudeHandoffChunk(ctx, chunk, opts, cfg)
+		if errCompact != nil && claudeHandoffContextTooLarge(errCompact) && depth < 5 && maxBytes > 16*1024 {
+			summary, errCompact = m.compactClaudeHandoffContextWithLimit(ctx, chunk, opts, cfg, maxBytes/2, depth+1)
+		}
+		if errCompact != nil {
+			return "", errCompact
+		}
+		summaries = append(summaries, summary)
+	}
+	merged := strings.TrimSpace(strings.Join(summaries, "\n\n"))
+	if len([]byte(merged)) > cfg.MaxSummaryBytes {
+		return "", claudeHandoffPermanentError{error: fmt.Errorf("merged compactor summary exceeds %d bytes", cfg.MaxSummaryBytes)}
+	}
+	return merged, nil
+}
+
+func (m *Manager) compactClaudeHandoffChunk(ctx context.Context, original []byte, opts cliproxyexecutor.Options, cfg internalconfig.ClaudeHandoffConfig) (string, error) {
 	compactorBody, errBuild := buildClaudeHandoffCompactorPayload(original, cfg.CompactorModel, cfg.CompactorMaxOutputTokens)
 	if errBuild != nil {
 		return "", errBuild
