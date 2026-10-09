@@ -957,6 +957,88 @@ func TestExecuteClaudeQuotaCompactsOnceAcrossTwoFailures(t *testing.T) {
 	}
 }
 
+type claudeHandoffRetryRoundExecutor struct {
+	nonStreamPayloads map[string][]byte
+}
+
+func (e *claudeHandoffRetryRoundExecutor) Identifier() string { return "claude" }
+func (e *claudeHandoffRetryRoundExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+func (*claudeHandoffRetryRoundExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
+}
+func (*claudeHandoffRetryRoundExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
+}
+func (*claudeHandoffRetryRoundExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
+}
+func (e *claudeHandoffRetryRoundExecutor) Execute(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if e.nonStreamPayloads == nil {
+		e.nonStreamPayloads = make(map[string][]byte)
+	}
+	e.nonStreamPayloads[auth.ID] = append([]byte(nil), req.Payload...)
+	if auth.ID == "claude-e" {
+		if !isAlreadyClaudeHandoffCompacted(req.Payload) {
+			return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusBadRequest, Message: "retry-round handoff payload missing"}
+		}
+		return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+	}
+	return cliproxyexecutor.Response{}, claudeQuotaError("This request would exceed your account's rate limit. Please try again later.", http.StatusTooManyRequests)
+}
+
+func TestExecuteClaudeQuotaCompactsOnceAcrossRetryRounds(t *testing.T) {
+	manager := NewManager(nil, claudeHandoffFlowSelector{}, nil)
+	manager.SetRetryConfig(2, 0, 2)
+	compactor := &claudeHandoffPayloadRecordingCompactorExecutor{}
+	executor := &claudeHandoffRetryRoundExecutor{}
+	manager.RegisterExecutor(executor)
+	manager.RegisterExecutor(compactor)
+	for _, entry := range []struct {
+		id    string
+		retry int
+	}{
+		{id: "claude-a", retry: 0},
+		{id: "claude-b", retry: 0},
+		{id: "claude-c", retry: 0},
+		{id: "claude-d", retry: 1},
+		{id: "claude-e", retry: 1},
+	} {
+		registry.GetGlobalRegistry().RegisterClient(entry.id, "claude", []*registry.ModelInfo{{ID: "claude-opus-5-5"}})
+		entryID := entry.id
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(entryID) })
+		if _, err := manager.Register(context.Background(), &Auth{ID: entry.id, Provider: "claude", Status: StatusActive, Attributes: map[string]string{"auth_kind": "oauth"}, Metadata: map[string]any{"disable_cooling": true, "request_retry": entry.retry}}); err != nil {
+			t.Fatalf("Register(%s) error = %v", entry.id, err)
+		}
+	}
+	registry.GetGlobalRegistry().RegisterClient("codex-a", "codex", []*registry.ModelInfo{{ID: "gpt-6-luna"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient("codex-a") })
+	if _, err := manager.Register(context.Background(), &Auth{ID: "codex-a", Provider: "codex", Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}); err != nil {
+		t.Fatalf("Register(codex-a) error = %v", err)
+	}
+	manager.SetConfig(claudeHandoffThreeAccountConfig())
+	payload := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"retry round handoff"}]}`)
+	resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload,
+		Metadata: map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: "claude-retry-round-session"},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if string(resp.Payload) != `{"ok":true}` {
+		t.Fatalf("final response = %s", resp.Payload)
+	}
+	if got := compactor.calls.Load(); got != 1 {
+		t.Fatalf("compactor calls = %d, want exactly one across retry rounds", got)
+	}
+	for _, authID := range []string{"claude-d", "claude-e"} {
+		if !isAlreadyClaudeHandoffCompacted(executor.nonStreamPayloads[authID]) {
+			t.Fatalf("%s did not receive compacted payload", authID)
+		}
+	}
+}
+
 func TestExecuteStreamClaudeQuotaCompactsOnceAcrossTwoFailures(t *testing.T) {
 	manager := NewManager(nil, claudeHandoffFlowSelector{}, nil)
 	manager.SetRetryConfig(0, 0, 0)

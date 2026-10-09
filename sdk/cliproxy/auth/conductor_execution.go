@@ -156,6 +156,11 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		if errExec == nil {
 			return resp, nil
 		}
+		if state, ok := claudeHandoffRetryState(errExec); ok {
+			req.Payload = bytes.Clone(state.payload)
+			opts = cloneClaudeHandoffRetryOptions(state.opts)
+			errExec = state.cause
+		}
 		if isRequestTerminatedError(errExec) || isRequestStopError(errExec) {
 			return cliproxyexecutor.Response{}, unwrapExecutionBoundaryError(errExec)
 		}
@@ -279,6 +284,11 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		result, errStream := m.executeStreamMixedOnce(ctx, normalized, req, roundOpts, maxRetryCredentials, &homeRetryLimit, attempt, defaultRequestRetry)
 		if errStream == nil {
 			return result, nil
+		}
+		if state, ok := claudeHandoffRetryState(errStream); ok {
+			req.Payload = bytes.Clone(state.payload)
+			opts = cloneClaudeHandoffRetryOptions(state.opts)
+			errStream = state.cause
 		}
 		if hasUpstreamExecutionAttempt(errStream) {
 			preferredUpstreamErr = errStream
@@ -499,7 +509,14 @@ func executorForAuth(executor ProviderExecutor, auth *Auth) ProviderExecutor {
 	return executor
 }
 
-func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, retryRound int, defaultRequestRetry int) (cliproxyexecutor.Response, error) {
+func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, retryRound int, defaultRequestRetry int) (resp cliproxyexecutor.Response, err error) {
+	var handoffPayload []byte
+	var handoffOpts cliproxyexecutor.Options
+	defer func() {
+		if err != nil && len(handoffPayload) > 0 {
+			err = &claudeHandoffRetryStateError{cause: err, payload: bytes.Clone(handoffPayload), opts: cloneClaudeHandoffRetryOptions(handoffOpts)}
+		}
+	}()
 	if len(providers) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -697,6 +714,8 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 						opts.OriginalRequest = bytes.Clone(compacted)
 						opts.Metadata = cloneSchedulerAnyMap(execOpts.Metadata)
 						opts = markClaudeHandoffCompacted(opts)
+						handoffPayload = req.Payload
+						handoffOpts = opts
 						// A successful handoff is itself a credential transition. If
 						// the caller capped this round at the exhausted credential,
 						// allow one replacement credential to receive the compacted
@@ -959,7 +978,14 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 	}
 }
 
-func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, homeRetryLimit *int, retryRound int, defaultRequestRetry int) (*cliproxyexecutor.StreamResult, error) {
+func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, maxRetryCredentials int, homeRetryLimit *int, retryRound int, defaultRequestRetry int) (result *cliproxyexecutor.StreamResult, err error) {
+	var handoffPayload []byte
+	var handoffOpts cliproxyexecutor.Options
+	defer func() {
+		if err != nil && len(handoffPayload) > 0 {
+			err = &claudeHandoffRetryStateError{cause: err, payload: bytes.Clone(handoffPayload), opts: cloneClaudeHandoffRetryOptions(handoffOpts)}
+		}
+	}()
 	if len(providers) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
@@ -1281,6 +1307,8 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					opts.OriginalRequest = bytes.Clone(compacted)
 					opts.Metadata = cloneSchedulerAnyMap(execOpts.Metadata)
 					opts = markClaudeHandoffCompacted(opts)
+					handoffPayload = req.Payload
+					handoffOpts = opts
 					if maxRetryCredentials > 0 && maxRetryCredentials <= len(attempted) {
 						maxRetryCredentials++
 					}

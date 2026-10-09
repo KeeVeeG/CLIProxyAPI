@@ -35,6 +35,49 @@ const (
 	claudeHandoffIdleCompactAfter     = 30 * time.Minute
 )
 
+type claudeHandoffCompactionLimiterKey struct{}
+
+// claudeHandoffCompactionLimiter caps upstream compactor calls across nested
+// chunk splitting. A worker can recursively split a context-too-large chunk;
+// without a shared limiter, every worker could start another full worker pool.
+type claudeHandoffCompactionLimiter struct {
+	slots chan struct{}
+}
+
+func ensureClaudeHandoffCompactionLimiter(ctx context.Context) (context.Context, *claudeHandoffCompactionLimiter) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if limiter, ok := ctx.Value(claudeHandoffCompactionLimiterKey{}).(*claudeHandoffCompactionLimiter); ok && limiter != nil {
+		return ctx, limiter
+	}
+	limiter := &claudeHandoffCompactionLimiter{slots: make(chan struct{}, claudeHandoffCompactorParallelism)}
+	return context.WithValue(ctx, claudeHandoffCompactionLimiterKey{}, limiter), limiter
+}
+
+func claudeHandoffCompactionLimiterFromContext(ctx context.Context) *claudeHandoffCompactionLimiter {
+	if ctx == nil {
+		return nil
+	}
+	limiter, _ := ctx.Value(claudeHandoffCompactionLimiterKey{}).(*claudeHandoffCompactionLimiter)
+	return limiter
+}
+
+func (l *claudeHandoffCompactionLimiter) acquire(ctx context.Context) (func(), error) {
+	if l == nil {
+		return func() {}, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case l.slots <- struct{}{}:
+		return func() { <-l.slots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 type claudeHandoffState struct {
 	Summary          string
 	UpdatedAt        time.Time
@@ -45,6 +88,44 @@ type claudeHandoffState struct {
 type claudeHandoffPermanentError struct{ error }
 
 func (claudeHandoffPermanentError) ClaudeHandoffPermanent() bool { return true }
+
+// claudeHandoffRetryStateError carries a successfully compacted request out of
+// one credential retry round. The outer retry loop otherwise starts the next
+// round with its original request value and would compact the same transcript
+// again after another Claude quota response.
+type claudeHandoffRetryStateError struct {
+	cause   error
+	payload []byte
+	opts    cliproxyexecutor.Options
+}
+
+func (e *claudeHandoffRetryStateError) Error() string {
+	if e == nil || e.cause == nil {
+		return ""
+	}
+	return e.cause.Error()
+}
+
+func (e *claudeHandoffRetryStateError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func cloneClaudeHandoffRetryOptions(opts cliproxyexecutor.Options) cliproxyexecutor.Options {
+	opts.OriginalRequest = bytes.Clone(opts.OriginalRequest)
+	opts.Metadata = cloneSchedulerAnyMap(opts.Metadata)
+	return opts
+}
+
+func claudeHandoffRetryState(err error) (*claudeHandoffRetryStateError, bool) {
+	var state *claudeHandoffRetryStateError
+	if !errors.As(err, &state) || state == nil || len(state.payload) == 0 {
+		return nil, false
+	}
+	return state, true
+}
 
 // claudeHandoffConfig returns normalized defaults without mutating the live config.
 func claudeHandoffConfig(cfg *internalconfig.Config) internalconfig.ClaudeHandoffConfig {
@@ -638,10 +719,12 @@ func normalizeClaudeHandoffCompactorText(text string) string {
 }
 
 func (m *Manager) compactClaudeHandoffContext(ctx context.Context, original []byte, opts cliproxyexecutor.Options, cfg internalconfig.ClaudeHandoffConfig) (string, error) {
+	ctx, _ = ensureClaudeHandoffCompactionLimiter(ctx)
 	return m.compactClaudeHandoffContextWithLimit(ctx, original, opts, cfg, claudeHandoffCompactorChunkBytes, 0)
 }
 
 func (m *Manager) compactClaudeHandoffContextWithLimit(ctx context.Context, original []byte, opts cliproxyexecutor.Options, cfg internalconfig.ClaudeHandoffConfig, maxBytes, depth int) (string, error) {
+	ctx, _ = ensureClaudeHandoffCompactionLimiter(ctx)
 	compactorPayload, err := claudeHandoffCompactorPayload(original)
 	if err != nil {
 		return "", err
@@ -659,7 +742,7 @@ func (m *Manager) compactClaudeHandoffContextWithLimit(ctx context.Context, orig
 		return "", fmt.Errorf("Claude handoff compactor produced no chunks")
 	}
 	// Resolve one working OAuth account before starting the batch. This avoids
-	// five workers racing through the credential pool at startup. The selected
+	// seven workers racing through the credential pool at startup. The selected
 	// account is pinned for the batch; if it becomes temporarily unavailable,
 	// compactClaudeHandoffChunk drops the dynamic pin and resumes normal
 	// credential rotation for that chunk.
@@ -799,7 +882,15 @@ func (m *Manager) compactClaudeHandoffChunk(ctx context.Context, original []byte
 	for attempt := 0; ; attempt++ {
 		// The Claude attempt may have installed a provider-specific round-tripper
 		// in the context. The compactor must resolve its own OpenAI transport.
-		resp, errExecute := m.Execute(contextForClaudeHandoff(ctx), []string{cfg.CompactorProvider}, compactorReq, compactorOpts)
+		execCtx := contextForClaudeHandoff(ctx)
+		limiter := claudeHandoffCompactionLimiterFromContext(execCtx)
+		release, errPermit := limiter.acquire(execCtx)
+		if errPermit != nil {
+			lastErr = errPermit
+			return "", errPermit
+		}
+		resp, errExecute := m.Execute(execCtx, []string{cfg.CompactorProvider}, compactorReq, compactorOpts)
+		release()
 		if errExecute == nil {
 			text := normalizeClaudeHandoffCompactorText(extractClaudeHandoffCompactorText(resp.Payload))
 			if text != "" && len([]byte(text)) <= cfg.MaxSummaryBytes {

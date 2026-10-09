@@ -53,7 +53,7 @@ the effective `gpt-6-luna` request window can be smaller than the larger
 client-advertised maximum.
 
 The first chunk is executed serially to find a working OAuth credential. The
-remaining chunks then run in a bounded batch of five requests pinned to that
+remaining chunks then run in a bounded batch of seven requests pinned to that
 credential, preserving summary order. A temporary failure releases the pin for
 that chunk so normal credential rotation can continue.
 
