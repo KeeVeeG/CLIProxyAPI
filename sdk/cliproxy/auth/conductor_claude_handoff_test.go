@@ -493,6 +493,8 @@ func TestPerformClaudeHandoffCompactsCurrentPayloadInsteadOfOriginalRequest(t *t
 	opts := claudeHandoffOptions()
 	opts.OriginalRequest = oversizedOriginal
 	opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = "claude-current-payload-session"
+	opts.Metadata[cliproxyexecutor.RequestedModelMetadataKey] = "claude-opus-5-5-xhigh"
+	opts.Metadata[cliproxyexecutor.AuthSelectionModelMetadataKey] = "claude-opus-5-5-xhigh"
 	if _, err := manager.performClaudeHandoff(context.Background(), cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: currentPayload}, opts, claudeQuotaError("quota", http.StatusTooManyRequests)); err != nil {
 		t.Fatalf("performClaudeHandoff() error = %v", err)
 	}
