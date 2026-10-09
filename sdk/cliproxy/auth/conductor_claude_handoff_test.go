@@ -63,6 +63,36 @@ func TestSplitClaudeHandoffPayloadKeepsChunksBelowCompactorLimit(t *testing.T) {
 	}
 }
 
+func TestSplitClaudeHandoffPayloadDoesNotMultiplyGiantMessageCalls(t *testing.T) {
+	payload, err := json.Marshal(map[string]any{
+		"model": "claude-opus-5-5",
+		"messages": []map[string]any{{
+			"role":    "user",
+			"content": strings.Repeat("large tool output ", 300000),
+		}, {
+			"role":    "user",
+			"content": "latest request",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	chunks, err := splitClaudeHandoffPayload(payload, claudeHandoffCompactorChunkBytes)
+	if err != nil {
+		t.Fatalf("splitClaudeHandoffPayload() error = %v", err)
+	}
+	// A giant result should consume the safe budget per fragment. A prior
+	// implementation used maxBytes/4 and turned this payload into ~40 calls.
+	if len(chunks) > 15 {
+		t.Fatalf("chunks = %d, want at most 15 for %d-byte giant message", len(chunks), len(payload))
+	}
+	for index, chunk := range chunks {
+		if len(chunk) > claudeHandoffCompactorChunkBytes {
+			t.Fatalf("chunk %d has %d bytes, want <= %d", index, len(chunk), claudeHandoffCompactorChunkBytes)
+		}
+	}
+}
+
 func TestSplitClaudeHandoffPayloadEscapedGiantMessageStaysBelowLimit(t *testing.T) {
 	payload, err := json.Marshal(map[string]any{
 		"model": "claude-opus-5-5",
