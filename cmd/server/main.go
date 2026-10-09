@@ -44,9 +44,9 @@ import (
 )
 
 var (
-	Version           = "dev"
-	Commit            = "none"
-	BuildDate         = "unknown"
+	Version           = buildinfo.Version
+	Commit            = buildinfo.Commit
+	BuildDate         = buildinfo.BuildDate
 	DefaultConfigPath = ""
 )
 
