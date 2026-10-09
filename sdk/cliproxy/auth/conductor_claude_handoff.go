@@ -20,28 +20,28 @@ import (
 )
 
 const (
-	handoffInternalMetadataKey = "cliproxy.handoff.internal"
-	handoffSummaryTag          = "<cli-proxy-context-handoff>"
-	handoffSummaryEndTag       = "</cli-proxy-context-handoff>"
+	claudeHandoffInternalMetadataKey = "cliproxy.claude_handoff.internal"
+	claudeHandoffSummaryTag          = "<cli-proxy-claude-handoff>"
+	claudeHandoffSummaryEndTag       = "</cli-proxy-claude-handoff>"
 )
 
-type handoffState struct {
+type claudeHandoffState struct {
 	Summary          string
 	UpdatedAt        time.Time
 	BoundaryMessages int
 	BoundaryHash     string
 }
 
-type handoffPermanentError struct{ error }
+type claudeHandoffPermanentError struct{ error }
 
-func (handoffPermanentError) HandoffPermanent() bool { return true }
+func (claudeHandoffPermanentError) ClaudeHandoffPermanent() bool { return true }
 
-// handoffConfig returns normalized defaults without mutating the live config.
-func handoffConfig(cfg *internalconfig.Config) internalconfig.HandoffConfig {
+// claudeHandoffConfig returns normalized defaults without mutating the live config.
+func claudeHandoffConfig(cfg *internalconfig.Config) internalconfig.ClaudeHandoffConfig {
 	if cfg == nil {
-		return internalconfig.HandoffConfig{}
+		return internalconfig.ClaudeHandoffConfig{}
 	}
-	out := cfg.Routing.Handoff
+	out := cfg.Routing.ClaudeHandoff
 	if strings.TrimSpace(out.CompactorProvider) == "" {
 		out.CompactorProvider = "codex"
 	}
@@ -63,15 +63,15 @@ func handoffConfig(cfg *internalconfig.Config) internalconfig.HandoffConfig {
 	return out
 }
 
-func handoffInternal(opts cliproxyexecutor.Options) bool {
+func claudeHandoffInternal(opts cliproxyexecutor.Options) bool {
 	if opts.Metadata == nil {
 		return false
 	}
-	value, _ := opts.Metadata[handoffInternalMetadataKey].(bool)
+	value, _ := opts.Metadata[claudeHandoffInternalMetadataKey].(bool)
 	return value
 }
 
-func handoffSessionID(opts cliproxyexecutor.Options) string {
+func claudeHandoffSessionID(opts cliproxyexecutor.Options) string {
 	if opts.Metadata == nil {
 		return ""
 	}
@@ -86,47 +86,47 @@ func handoffSessionID(opts cliproxyexecutor.Options) string {
 	return ""
 }
 
-func handoffSummaryFromState(m *Manager, sessionID string) (handoffState, bool) {
+func claudeHandoffSummaryFromState(m *Manager, sessionID string) (claudeHandoffState, bool) {
 	if m == nil || sessionID == "" {
-		return handoffState{}, false
+		return claudeHandoffState{}, false
 	}
-	m.handoffMu.RLock()
-	state, ok := m.handoffStates[sessionID]
-	m.handoffMu.RUnlock()
-	// Handoff state is deliberately bounded in time. A Claude session can be
+	m.claudeHandoffMu.RLock()
+	state, ok := m.claudeHandoffStates[sessionID]
+	m.claudeHandoffMu.RUnlock()
+	// ClaudeClaude handoff state is deliberately bounded in time. A Claude session can be
 	// reused for days, but carrying a stale summary into a new session would be
 	// worse than paying for one fresh compaction.
 	if ok && !state.UpdatedAt.IsZero() && time.Since(state.UpdatedAt) > 24*time.Hour {
-		m.handoffMu.Lock()
-		delete(m.handoffStates, sessionID)
-		m.handoffMu.Unlock()
-		return handoffState{}, false
+		m.claudeHandoffMu.Lock()
+		delete(m.claudeHandoffStates, sessionID)
+		m.claudeHandoffMu.Unlock()
+		return claudeHandoffState{}, false
 	}
 	return state, ok && strings.TrimSpace(state.Summary) != ""
 }
 
-func (m *Manager) handoffSessionLock(sessionID string) *sync.Mutex {
+func (m *Manager) claudeHandoffSessionLock(sessionID string) *sync.Mutex {
 	if m == nil || sessionID == "" {
 		return nil
 	}
-	value, _ := m.handoffLocks.LoadOrStore(sessionID, &sync.Mutex{})
+	value, _ := m.claudeHandoffLocks.LoadOrStore(sessionID, &sync.Mutex{})
 	return value.(*sync.Mutex)
 }
 
-func (m *Manager) rememberHandoffSummary(sessionID, summary string) {
+func (m *Manager) rememberClaudeHandoffSummary(sessionID, summary string) {
 	if m == nil || sessionID == "" || strings.TrimSpace(summary) == "" {
 		return
 	}
-	m.handoffMu.Lock()
-	if m.handoffStates == nil {
-		m.handoffStates = make(map[string]handoffState)
+	m.claudeHandoffMu.Lock()
+	if m.claudeHandoffStates == nil {
+		m.claudeHandoffStates = make(map[string]claudeHandoffState)
 	}
-	m.handoffStates[sessionID] = handoffState{Summary: summary, UpdatedAt: time.Now()}
-	m.handoffMu.Unlock()
+	m.claudeHandoffStates[sessionID] = claudeHandoffState{Summary: summary, UpdatedAt: time.Now()}
+	m.claudeHandoffMu.Unlock()
 }
 
-func (m *Manager) rememberHandoffSummaryForPayload(sessionID, summary string, payload []byte) {
-	state := handoffState{Summary: summary, UpdatedAt: time.Now()}
+func (m *Manager) rememberClaudeHandoffSummaryForPayload(sessionID, summary string, payload []byte) {
+	state := claudeHandoffState{Summary: summary, UpdatedAt: time.Now()}
 	messages := gjson.GetBytes(payload, "messages")
 	if messages.IsArray() && len(messages.Array()) > 0 {
 		state.BoundaryMessages = len(messages.Array())
@@ -134,18 +134,18 @@ func (m *Manager) rememberHandoffSummaryForPayload(sessionID, summary string, pa
 			state.BoundaryMessages--
 		}
 		if state.BoundaryMessages > 0 {
-			state.BoundaryHash = handoffMessagesHash(messages.Array()[:state.BoundaryMessages])
+			state.BoundaryHash = claudeHandoffMessagesHash(messages.Array()[:state.BoundaryMessages])
 		}
 	}
-	m.handoffMu.Lock()
-	if m.handoffStates == nil {
-		m.handoffStates = make(map[string]handoffState)
+	m.claudeHandoffMu.Lock()
+	if m.claudeHandoffStates == nil {
+		m.claudeHandoffStates = make(map[string]claudeHandoffState)
 	}
-	m.handoffStates[sessionID] = state
-	m.handoffMu.Unlock()
+	m.claudeHandoffStates[sessionID] = state
+	m.claudeHandoffMu.Unlock()
 }
 
-func handoffMessagesHash(messages []gjson.Result) string {
+func claudeHandoffMessagesHash(messages []gjson.Result) string {
 	hash := sha256.New()
 	for _, message := range messages {
 		_, _ = hash.Write([]byte(message.Raw))
@@ -155,7 +155,7 @@ func handoffMessagesHash(messages []gjson.Result) string {
 }
 
 func isClaudeHandoffCandidate(provider string, opts cliproxyexecutor.Options, err error) bool {
-	if !strings.EqualFold(strings.TrimSpace(provider), "claude") || opts.SourceFormat.String() != "claude" || handoffInternal(opts) || err == nil {
+	if !strings.EqualFold(strings.TrimSpace(provider), "claude") || opts.SourceFormat.String() != "claude" || claudeHandoffInternal(opts) || err == nil {
 		return false
 	}
 	if statusCodeFromError(err) != http.StatusTooManyRequests {
@@ -176,14 +176,14 @@ func isClaudeHandoffCandidate(provider string, opts cliproxyexecutor.Options, er
 		strings.Contains(message, "both limits exceeded")
 }
 
-func isTemporaryHandoffError(err error) bool {
+func isTemporaryClaudeHandoffError(err error) bool {
 	if err == nil {
 		return false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	var permanent handoffPermanentError
+	var permanent claudeHandoffPermanentError
 	if errors.As(err, &permanent) {
 		return false
 	}
@@ -207,7 +207,7 @@ func isTemporaryHandoffError(err error) bool {
 	}
 }
 
-func handoffRetryDelay(err error, attempt int, maxInterval time.Duration) time.Duration {
+func claudeHandoffRetryDelay(err error, attempt int, maxInterval time.Duration) time.Duration {
 	if retryAfter := retryAfterFromError(err); retryAfter != nil && *retryAfter > 0 {
 		if *retryAfter > maxInterval {
 			return maxInterval
@@ -224,10 +224,10 @@ func handoffRetryDelay(err error, attempt int, maxInterval time.Duration) time.D
 	return delay
 }
 
-// contextForHandoff preserves cancellation and deadlines while clearing the
+// contextForClaudeHandoff preserves cancellation and deadlines while clearing the
 // round-tripper values installed for the failed Claude attempt. Manager.Execute
 // will install the selected compactor credential's transport itself.
-func contextForHandoff(ctx context.Context) context.Context {
+func contextForClaudeHandoff(ctx context.Context) context.Context {
 	if ctx == nil {
 		return context.Background()
 	}
@@ -235,7 +235,7 @@ func contextForHandoff(ctx context.Context) context.Context {
 	return context.WithValue(ctx, "cliproxy.roundtripper", nil)
 }
 
-func (m *Manager) hasHandoffCompactorAuth(provider, pinnedID string) bool {
+func (m *Manager) hasClaudeHandoffCompactorAuth(provider, pinnedID string) bool {
 	if m == nil {
 		return false
 	}
@@ -252,14 +252,14 @@ func (m *Manager) hasHandoffCompactorAuth(provider, pinnedID string) bool {
 	return false
 }
 
-func (m *Manager) applyHandoffState(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, providers []string) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
-	cfg := handoffConfig(m.runtimeConfigSnapshot())
-	if !cfg.Enabled || handoffInternal(opts) || opts.SourceFormat.String() != "claude" || !containsProvider(providers, "claude") {
+func (m *Manager) applyClaudeHandoffState(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, providers []string) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
+	cfg := claudeHandoffConfig(m.runtimeConfigSnapshot())
+	if !cfg.Enabled || claudeHandoffInternal(opts) || opts.SourceFormat.String() != "claude" || !containsProvider(providers, "claude") {
 		return req, opts
 	}
-	sessionID := handoffSessionID(opts)
-	state, ok := handoffSummaryFromState(m, sessionID)
-	if !ok || isAlreadyHandoffCompacted(req.Payload) {
+	sessionID := claudeHandoffSessionID(opts)
+	state, ok := claudeHandoffSummaryFromState(m, sessionID)
+	if !ok || isAlreadyClaudeHandoffCompacted(req.Payload) {
 		return req, opts
 	}
 	rewritten, errRewrite := rewriteClaudeHandoffPayloadWithState(req.Payload, state, cfg.KeepRecentMessages)
@@ -271,17 +271,17 @@ func (m *Manager) applyHandoffState(req cliproxyexecutor.Request, opts cliproxye
 	return req, opts
 }
 
-func isAlreadyHandoffCompacted(payload []byte) bool {
-	if bytes.Contains(payload, []byte(handoffSummaryTag)) {
+func isAlreadyClaudeHandoffCompacted(payload []byte) bool {
+	if bytes.Contains(payload, []byte(claudeHandoffSummaryTag)) {
 		return true
 	}
 	// encoding/json escapes HTML-sensitive delimiters in the synthetic text
 	// block, so detect the canonical escaped representation as well.
-	return bytes.Contains(payload, []byte(`\u003ccli-proxy-context-handoff\u003e`))
+	return bytes.Contains(payload, []byte(`\u003ccli-proxy-claude-handoff\u003e`))
 }
 
-func buildCompactorPayload(original []byte, model string, maxOutputTokens int) ([]byte, error) {
-	instructions := "You are a context handoff compactor. Return only a concise JSON object with these keys: goal, constraints, decisions, current_state, files_changed, tests_and_results, pending_tasks, important_tool_results, latest_user_request, open_questions. Preserve concrete facts, file paths, commands, errors, tool outcomes, and unfinished work. Do not include hidden chain-of-thought, speculation, or markdown fences. Do not answer the task."
+func buildClaudeHandoffCompactorPayload(original []byte, model string, maxOutputTokens int) ([]byte, error) {
+	instructions := "You are a Claude context handoff compactor. Return only a concise JSON object with these keys: goal, constraints, decisions, current_state, files_changed, tests_and_results, pending_tasks, important_tool_results, latest_user_request, open_questions. Preserve concrete facts, file paths, commands, errors, tool outcomes, and unfinished work. Do not include hidden chain-of-thought, speculation, or markdown fences. Do not answer the task."
 	text := instructions + "\n\n<claude_request>\n" + string(original) + "\n</claude_request>"
 	body := map[string]any{
 		"model":        model,
@@ -297,7 +297,7 @@ func buildCompactorPayload(original []byte, model string, maxOutputTokens int) (
 	return json.Marshal(body)
 }
 
-func extractCompactorText(payload []byte) string {
+func extractClaudeHandoffCompactorText(payload []byte) string {
 	var parts []string
 	for _, item := range gjson.GetBytes(payload, "output").Array() {
 		for _, content := range item.Get("content").Array() {
@@ -314,7 +314,7 @@ func extractCompactorText(payload []byte) string {
 	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
-func normalizeCompactorText(text string) string {
+func normalizeClaudeHandoffCompactorText(text string) string {
 	text = strings.TrimSpace(text)
 	if strings.HasPrefix(text, "```") && strings.HasSuffix(text, "```") {
 		lines := strings.Split(text, "\n")
@@ -325,8 +325,8 @@ func normalizeCompactorText(text string) string {
 	return strings.TrimSpace(text)
 }
 
-func (m *Manager) compactClaudeContext(ctx context.Context, original []byte, opts cliproxyexecutor.Options, cfg internalconfig.HandoffConfig) (string, error) {
-	compactorBody, errBuild := buildCompactorPayload(original, cfg.CompactorModel, cfg.CompactorMaxOutputTokens)
+func (m *Manager) compactClaudeHandoffContext(ctx context.Context, original []byte, opts cliproxyexecutor.Options, cfg internalconfig.ClaudeHandoffConfig) (string, error) {
+	compactorBody, errBuild := buildClaudeHandoffCompactorPayload(original, cfg.CompactorModel, cfg.CompactorMaxOutputTokens)
 	if errBuild != nil {
 		return "", errBuild
 	}
@@ -334,7 +334,7 @@ func (m *Manager) compactClaudeContext(ctx context.Context, original []byte, opt
 	if metadata == nil {
 		metadata = make(map[string]any, 1)
 	}
-	metadata[handoffInternalMetadataKey] = true
+	metadata[claudeHandoffInternalMetadataKey] = true
 	compactorOpts := cliproxyexecutor.Options{
 		SourceFormat:    sdktranslator.FormatOpenAIResponse,
 		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
@@ -350,25 +350,25 @@ func (m *Manager) compactClaudeContext(ctx context.Context, original []byte, opt
 	for attempt := 0; ; attempt++ {
 		// The Claude attempt may have installed a provider-specific round-tripper
 		// in the context. The compactor must resolve its own OpenAI transport.
-		resp, errExecute := m.Execute(contextForHandoff(ctx), []string{cfg.CompactorProvider}, compactorReq, compactorOpts)
+		resp, errExecute := m.Execute(contextForClaudeHandoff(ctx), []string{cfg.CompactorProvider}, compactorReq, compactorOpts)
 		if errExecute == nil {
-			text := normalizeCompactorText(extractCompactorText(resp.Payload))
+			text := normalizeClaudeHandoffCompactorText(extractClaudeHandoffCompactorText(resp.Payload))
 			if text != "" && len([]byte(text)) <= cfg.MaxSummaryBytes {
 				return text, nil
 			}
 			if text == "" {
-				errExecute = handoffPermanentError{error: fmt.Errorf("compactor returned no summary text")}
+				errExecute = claudeHandoffPermanentError{error: fmt.Errorf("compactor returned no summary text")}
 			} else {
-				errExecute = handoffPermanentError{error: fmt.Errorf("compactor summary exceeds %d bytes", cfg.MaxSummaryBytes)}
+				errExecute = claudeHandoffPermanentError{error: fmt.Errorf("compactor summary exceeds %d bytes", cfg.MaxSummaryBytes)}
 			}
 		}
 		lastErr = errExecute
-		temporary := isTemporaryHandoffError(errExecute)
+		temporary := isTemporaryClaudeHandoffError(errExecute)
 		// A registered compactor credential can be temporarily unavailable
 		// because the normal selector cooled it after a transient failure. Keep
 		// retrying that case; an absent provider/auth remains a permanent setup
 		// error and does not spin forever.
-		if !temporary && m.hasHandoffCompactorAuth(cfg.CompactorProvider, cfg.CompactorAuthID) {
+		if !temporary && m.hasClaudeHandoffCompactorAuth(cfg.CompactorProvider, cfg.CompactorAuthID) {
 			var authErr *Error
 			if errors.As(errExecute, &authErr) && authErr != nil && strings.EqualFold(authErr.Code, "auth_not_found") {
 				temporary = true
@@ -377,7 +377,7 @@ func (m *Manager) compactClaudeContext(ctx context.Context, original []byte, opt
 		if !temporary {
 			return "", fmt.Errorf("context compaction failed permanently: %w", errExecute)
 		}
-		delay := handoffRetryDelay(errExecute, attempt, maxInterval)
+		delay := claudeHandoffRetryDelay(errExecute, attempt, maxInterval)
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -395,32 +395,32 @@ func (m *Manager) compactClaudeContext(ctx context.Context, original []byte, opt
 
 func (m *Manager) performClaudeHandoff(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, cause error) ([]byte, error) {
 	if m == nil {
-		return nil, fmt.Errorf("context handoff manager is unavailable")
+		return nil, fmt.Errorf("Claude handoff manager is unavailable")
 	}
-	cfg := handoffConfig(m.runtimeConfigSnapshot())
+	cfg := claudeHandoffConfig(m.runtimeConfigSnapshot())
 	if !cfg.Enabled {
-		return nil, fmt.Errorf("context handoff is disabled")
+		return nil, fmt.Errorf("Claude handoff is disabled")
 	}
-	sessionID := handoffSessionID(opts)
+	sessionID := claudeHandoffSessionID(opts)
 	if sessionID == "" {
-		return nil, fmt.Errorf("context handoff requires a stable Claude session id")
+		return nil, fmt.Errorf("Claude handoff requires a stable Claude session id")
 	}
-	lock := m.handoffSessionLock(sessionID)
+	lock := m.claudeHandoffSessionLock(sessionID)
 	if lock == nil {
-		return nil, fmt.Errorf("context handoff session lock is unavailable")
+		return nil, fmt.Errorf("Claude handoff session lock is unavailable")
 	}
 	lock.Lock()
 	defer lock.Unlock()
-	if state, ok := handoffSummaryFromState(m, sessionID); ok {
+	if state, ok := claudeHandoffSummaryFromState(m, sessionID); ok {
 		payload := opts.OriginalRequest
 		if len(payload) == 0 {
 			payload = req.Payload
 		}
-		// Once a request already contains a handoff envelope, compact the
+		// Once a request already contains a Claude handoff envelope, compact the
 		// current envelope again. This prevents a long-running session from
 		// accumulating an ever-growing post-handoff tail on the next quota.
-		if isAlreadyHandoffCompacted(payload) {
-			summary, errCompact := m.compactClaudeContext(ctx, payload, opts, cfg)
+		if isAlreadyClaudeHandoffCompacted(payload) {
+			summary, errCompact := m.compactClaudeHandoffContext(ctx, payload, opts, cfg)
 			if errCompact != nil {
 				return nil, fmt.Errorf("refresh Claude context after %v: %w", cause, errCompact)
 			}
@@ -428,7 +428,7 @@ func (m *Manager) performClaudeHandoff(ctx context.Context, req cliproxyexecutor
 			if errRewrite != nil {
 				return nil, fmt.Errorf("rewrite refreshed Claude request after compaction: %w", errRewrite)
 			}
-			m.rememberHandoffSummaryForPayload(sessionID, summary, payload)
+			m.rememberClaudeHandoffSummaryForPayload(sessionID, summary, payload)
 			return rewritten, nil
 		}
 		return rewriteClaudeHandoffPayloadWithState(payload, state, cfg.KeepRecentMessages)
@@ -438,9 +438,9 @@ func (m *Manager) performClaudeHandoff(ctx context.Context, req cliproxyexecutor
 		original = req.Payload
 	}
 	if len(original) == 0 {
-		return nil, fmt.Errorf("context handoff has no original request body")
+		return nil, fmt.Errorf("Claude handoff has no original request body")
 	}
-	summary, errCompact := m.compactClaudeContext(ctx, original, opts, cfg)
+	summary, errCompact := m.compactClaudeHandoffContext(ctx, original, opts, cfg)
 	if errCompact != nil {
 		return nil, fmt.Errorf("compact Claude context after %v: %w", cause, errCompact)
 	}
@@ -448,19 +448,19 @@ func (m *Manager) performClaudeHandoff(ctx context.Context, req cliproxyexecutor
 	if errRewrite != nil {
 		return nil, fmt.Errorf("rewrite Claude request after compaction: %w", errRewrite)
 	}
-	m.rememberHandoffSummaryForPayload(sessionID, summary, original)
+	m.rememberClaudeHandoffSummaryForPayload(sessionID, summary, original)
 	return rewritten, nil
 }
 
-func rewriteClaudeHandoffPayloadWithState(payload []byte, state handoffState, keepRecent int) ([]byte, error) {
+func rewriteClaudeHandoffPayloadWithState(payload []byte, state claudeHandoffState, keepRecent int) ([]byte, error) {
 	if state.BoundaryMessages <= 0 || state.BoundaryHash == "" {
 		return rewriteClaudeHandoffPayload(payload, state.Summary, keepRecent)
 	}
 	messages := gjson.GetBytes(payload, "messages")
-	if !messages.IsArray() || len(messages.Array()) < state.BoundaryMessages || handoffMessagesHash(messages.Array()[:state.BoundaryMessages]) != state.BoundaryHash {
+	if !messages.IsArray() || len(messages.Array()) < state.BoundaryMessages || claudeHandoffMessagesHash(messages.Array()[:state.BoundaryMessages]) != state.BoundaryHash {
 		return rewriteClaudeHandoffPayload(payload, state.Summary, keepRecent)
 	}
-	tail := sanitizeHandoffMessageSlice(messages.Array()[state.BoundaryMessages:])
+	tail := sanitizeClaudeHandoffMessageSlice(messages.Array()[state.BoundaryMessages:])
 	return rewriteClaudeHandoffPayloadWithTail(payload, state.Summary, tail)
 }
 
@@ -469,27 +469,27 @@ func rewriteClaudeHandoffPayload(payload []byte, summary string, keepRecent int)
 	if !messages.IsArray() {
 		return nil, fmt.Errorf("Claude handoff requires messages array")
 	}
-	tail := sanitizeHandoffMessages(messages.Array(), keepRecent)
+	tail := sanitizeClaudeHandoffMessages(messages.Array(), keepRecent)
 	return rewriteClaudeHandoffPayloadWithTail(payload, summary, tail)
 }
 
 func rewriteClaudeHandoffPayloadWithTail(payload []byte, summary string, tail []string) ([]byte, error) {
-	handoffUser, _ := json.Marshal(map[string]any{
+	claudeHandoffUser, _ := json.Marshal(map[string]any{
 		"role": "user",
 		"content": []map[string]any{{
 			"type": "text",
-			"text": handoffSummaryTag + "\n" + summary + "\n" + handoffSummaryEndTag,
+			"text": claudeHandoffSummaryTag + "\n" + summary + "\n" + claudeHandoffSummaryEndTag,
 		}},
 	})
-	handoffAssistant, _ := json.Marshal(map[string]any{
+	claudeHandoffAssistant, _ := json.Marshal(map[string]any{
 		"role": "assistant",
 		"content": []map[string]any{{
 			"type": "text",
-			"text": "I will continue from the handoff context.",
+			"text": "I will continue from the Claude handoff context.",
 		}},
 	})
 	items := make([]string, 0, len(tail)+2)
-	items = append(items, string(handoffUser), string(handoffAssistant))
+	items = append(items, string(claudeHandoffUser), string(claudeHandoffAssistant))
 	items = append(items, tail...)
 	updated, errSet := sjson.SetRawBytes(payload, "messages", []byte("["+strings.Join(items, ",")+"]"))
 	if errSet != nil {
@@ -498,7 +498,7 @@ func rewriteClaudeHandoffPayloadWithTail(payload []byte, summary string, tail []
 	return updated, nil
 }
 
-func sanitizeHandoffMessages(messages []gjson.Result, keepRecent int) []string {
+func sanitizeClaudeHandoffMessages(messages []gjson.Result, keepRecent int) []string {
 	if keepRecent <= 0 {
 		keepRecent = 8
 	}
@@ -512,14 +512,14 @@ func sanitizeHandoffMessages(messages []gjson.Result, keepRecent int) []string {
 	if start >= len(messages) {
 		return nil
 	}
-	return sanitizeHandoffMessageSlice(messages[start:])
+	return sanitizeClaudeHandoffMessageSlice(messages[start:])
 }
 
-// sanitizeHandoffMessageSlice removes provider-internal reasoning and broken
+// sanitizeClaudeHandoffMessageSlice removes provider-internal reasoning and broken
 // tool blocks while preserving every remaining user/assistant message. It is
 // used for the post-boundary portion of a session, where truncating to a fixed
 // number of messages could silently discard turns created after the handoff.
-func sanitizeHandoffMessageSlice(tail []gjson.Result) []string {
+func sanitizeClaudeHandoffMessageSlice(tail []gjson.Result) []string {
 	toolUses := make(map[string]bool)
 	toolResults := make(map[string]bool)
 	for _, message := range tail {

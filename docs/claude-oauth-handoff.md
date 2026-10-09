@@ -1,6 +1,6 @@
 # Claude OAuth context handoff
 
-The routing handoff is an opt-in failover path for Claude Messages OAuth
+The Claude routing handoff is an opt-in failover path for Claude Messages OAuth
 credentials. It is useful with `fill-first` when one Claude account reaches its
 request or subscription limit while the active conversation is large.
 
@@ -19,7 +19,7 @@ Enable it under `routing`:
 ```yaml
 routing:
   strategy: fill-first
-  handoff:
+  claude-handoff:
     enabled: true
     compactor-provider: codex
     compactor-model: gpt-6.1-sol
@@ -31,8 +31,8 @@ routing:
 ```
 
 The compactor request carries the same session metadata but is marked
-`cliproxy.handoff.internal`, so a Claude quota response from the compactor
-cannot recursively trigger another handoff. Set `compactor-auth-id` when one
+`cliproxy.claude_handoff.internal`, so a Claude quota response from the compactor
+cannot recursively trigger another Claude handoff. Set `compactor-auth-id` when one
 specific OpenAI OAuth credential should be used for compaction.
 
 Temporary compactor failures (network failures, 408, 429, 502, 503, 504, and
@@ -44,7 +44,7 @@ an empty response, or an oversized summary fail immediately. With the default
 Claude account after a failed compaction. Set `fail-open: true` only if losing
 the request is worse than paying for the full context.
 
-Handoff state is keyed by the normalized session/conversation ID already
+Claude handoff state is keyed by the normalized session/conversation ID already
 extracted by CLIProxyAPI. It is kept for 24 hours. A later quota in the same
 session compacts the current handoff envelope again, so repeated account
 rotation does not grow the transcript without bound. The mechanism runs in the

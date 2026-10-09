@@ -66,7 +66,7 @@ func TestIsClaudeHandoffCandidateRequiresExactQuotaSignal(t *testing.T) {
 
 func TestIsClaudeHandoffCandidateSkipsInternalCompactor(t *testing.T) {
 	opts := claudeHandoffOptions()
-	opts.Metadata[handoffInternalMetadataKey] = true
+	opts.Metadata[claudeHandoffInternalMetadataKey] = true
 	if isClaudeHandoffCandidate("claude", opts, claudeQuotaError("This request would exceed your account's rate limit", http.StatusTooManyRequests)) {
 		t.Fatal("compactor request must not recursively trigger a Claude handoff")
 	}
@@ -103,9 +103,9 @@ func TestIsClaudeHandoffCandidateReadsStreamBootstrapQuotaError(t *testing.T) {
 
 func TestBuildCompactorPayloadUsesXHighAndPreservesTranscript(t *testing.T) {
 	original := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"keep this fact"}]}`)
-	payload, err := buildCompactorPayload(original, "gpt-6.1-sol", 4096)
+	payload, err := buildClaudeHandoffCompactorPayload(original, "gpt-6.1-sol", 4096)
 	if err != nil {
-		t.Fatalf("buildCompactorPayload() error = %v", err)
+		t.Fatalf("buildClaudeHandoffCompactorPayload() error = %v", err)
 	}
 	if got := gjson.GetBytes(payload, "model").String(); got != "gpt-6.1-sol" {
 		t.Fatalf("model = %q, want gpt-6.1-sol", got)
@@ -140,7 +140,7 @@ func TestRewriteClaudeHandoffPayloadPreservesEnvelopeAndDoesNotMutateInput(t *te
 	if len(messages) != 3 {
 		t.Fatalf("rewritten messages = %d, want summary pair plus one recent message", len(messages))
 	}
-	if !strings.Contains(messages[0].Get("content.0.text").String(), handoffSummaryTag) || !strings.Contains(messages[0].Get("content.0.text").String(), "run tests") {
+	if !strings.Contains(messages[0].Get("content.0.text").String(), claudeHandoffSummaryTag) || !strings.Contains(messages[0].Get("content.0.text").String(), "run tests") {
 		t.Fatalf("summary marker/content missing from first message: %s", messages[0].Raw)
 	}
 	if messages[1].Get("role").String() != "assistant" {
@@ -151,7 +151,7 @@ func TestRewriteClaudeHandoffPayloadPreservesEnvelopeAndDoesNotMutateInput(t *te
 	}
 }
 
-func TestSanitizeHandoffMessagesDropsThinkingAndOrphanToolBlocks(t *testing.T) {
+func TestSanitizeClaudeHandoffMessagesDropsThinkingAndOrphanToolBlocks(t *testing.T) {
 	payload := []byte(`{"messages":[
 {"role":"user","content":[{"type":"text","text":"request"}]},
 {"role":"assistant","content":[{"type":"thinking","thinking":"secret"},{"type":"tool_use","id":"orphan","name":"read_file","input":{}}]},
@@ -172,7 +172,7 @@ func TestSanitizeHandoffMessagesDropsThinkingAndOrphanToolBlocks(t *testing.T) {
 	}
 }
 
-func TestSanitizeHandoffMessagesDropsUnfinishedToolUseAndThinking(t *testing.T) {
+func TestSanitizeClaudeHandoffMessagesDropsUnfinishedToolUseAndThinking(t *testing.T) {
 	payload := []byte(`{"messages":[
 {"role":"user","content":[{"type":"text","text":"request"}]},
 {"role":"assistant","content":[{"type":"thinking","thinking":"hidden"},{"type":"redacted_thinking","data":"opaque"},{"type":"tool_use","id":"pending","name":"read_file","input":{}},{"type":"text","text":"visible"}]},
@@ -193,7 +193,7 @@ func TestSanitizeHandoffMessagesDropsUnfinishedToolUseAndThinking(t *testing.T) 
 	}
 }
 
-func TestSanitizeHandoffMessageSlicePreservesPostBoundaryAssistantTurn(t *testing.T) {
+func TestSanitizeClaudeHandoffMessageSlicePreservesPostBoundaryAssistantTurn(t *testing.T) {
 	// A subsequent Claude request can begin with the assistant turn that
 	// followed the compaction boundary. The post-boundary sanitizer must not
 	// apply the initial "start at user" rule to this slice.
@@ -202,7 +202,7 @@ func TestSanitizeHandoffMessageSlicePreservesPostBoundaryAssistantTurn(t *testin
 {"role":"user","content":[{"type":"text","text":"next request"}]}
 ]}`)
 	messages := gjson.GetBytes(payload, "messages").Array()
-	got := sanitizeHandoffMessageSlice(messages)
+	got := sanitizeClaudeHandoffMessageSlice(messages)
 	if len(got) != 2 {
 		t.Fatalf("sanitized post-boundary messages = %d, want 2", len(got))
 	}
@@ -211,31 +211,31 @@ func TestSanitizeHandoffMessageSlicePreservesPostBoundaryAssistantTurn(t *testin
 	}
 }
 
-func TestApplyHandoffStateIsIdempotent(t *testing.T) {
+func TestApplyClaudeHandoffStateIsIdempotent(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{Handoff: internalconfig.HandoffConfig{Enabled: true, KeepRecentMessages: 1}}})
-	manager.rememberHandoffSummary("session-test", `{"goal":"continue"}`)
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{Enabled: true, KeepRecentMessages: 1}}})
+	manager.rememberClaudeHandoffSummary("session-test", `{"goal":"continue"}`)
 	req := cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"latest"}]}`)}
 	opts := claudeHandoffOptions()
-	firstReq, firstOpts := manager.applyHandoffState(req, opts, []string{"claude"})
-	if firstOpts.OriginalRequest == nil || !strings.Contains(gjson.GetBytes(firstReq.Payload, "messages.0.content.0.text").String(), handoffSummaryTag) {
+	firstReq, firstOpts := manager.applyClaudeHandoffState(req, opts, []string{"claude"})
+	if firstOpts.OriginalRequest == nil || !strings.Contains(gjson.GetBytes(firstReq.Payload, "messages.0.content.0.text").String(), claudeHandoffSummaryTag) {
 		t.Fatalf("first application did not rewrite request: %s", firstReq.Payload)
 	}
-	secondReq, _ := manager.applyHandoffState(firstReq, firstOpts, []string{"claude"})
+	secondReq, _ := manager.applyClaudeHandoffState(firstReq, firstOpts, []string{"claude"})
 	if !reflect.DeepEqual(firstReq.Payload, secondReq.Payload) {
-		t.Fatalf("handoff rewrite is not idempotent:\nfirst=%s\nsecond=%s", firstReq.Payload, secondReq.Payload)
+		t.Fatalf("Claude handoff rewrite is not idempotent:\nfirst=%s\nsecond=%s", firstReq.Payload, secondReq.Payload)
 	}
 }
 
-func TestApplyHandoffStateKeepsTurnsAddedAfterBoundary(t *testing.T) {
+func TestApplyClaudeHandoffStateKeepsTurnsAddedAfterBoundary(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{Handoff: internalconfig.HandoffConfig{Enabled: true, KeepRecentMessages: 1}}})
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{Enabled: true, KeepRecentMessages: 1}}})
 	basePayload := []byte(`{"model":"claude-opus-5-5","messages":[
 {"role":"user","content":"before"},
 {"role":"assistant","content":"answer"},
 {"role":"user","content":"boundary"}
 ]}`)
-	manager.rememberHandoffSummaryForPayload("session-test", `{"goal":"continue"}`, basePayload)
+	manager.rememberClaudeHandoffSummaryForPayload("session-test", `{"goal":"continue"}`, basePayload)
 	nextPayload := []byte(`{"model":"claude-opus-5-5","messages":[
 {"role":"user","content":"before"},
 {"role":"assistant","content":"answer"},
@@ -243,7 +243,7 @@ func TestApplyHandoffStateKeepsTurnsAddedAfterBoundary(t *testing.T) {
 {"role":"assistant","content":"post-boundary answer"},
 {"role":"user","content":"new request"}
 ]}`)
-	req, _ := manager.applyHandoffState(cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: nextPayload}, claudeHandoffOptions(), []string{"claude"})
+	req, _ := manager.applyClaudeHandoffState(cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: nextPayload}, claudeHandoffOptions(), []string{"claude"})
 	messages := gjson.GetBytes(req.Payload, "messages").Array()
 	if len(messages) != 5 {
 		t.Fatalf("rewritten message count = %d, want summary pair + boundary and 2 post-boundary turns", len(messages))
@@ -259,15 +259,15 @@ func TestApplyHandoffStateKeepsTurnsAddedAfterBoundary(t *testing.T) {
 	}
 }
 
-func TestHandoffStateKeepsTurnsAddedAfterBoundary(t *testing.T) {
+func TestClaudeHandoffStateKeepsTurnsAddedAfterBoundary(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{Handoff: internalconfig.HandoffConfig{Enabled: true, KeepRecentMessages: 1}}})
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{Enabled: true, KeepRecentMessages: 1}}})
 	original := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"old request"},{"role":"assistant","content":"old answer"},{"role":"user","content":"current request"}]}`)
-	manager.rememberHandoffSummaryForPayload("session-test", `{"goal":"continue"}`, original)
+	manager.rememberClaudeHandoffSummaryForPayload("session-test", `{"goal":"continue"}`, original)
 	updated := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"old request"},{"role":"assistant","content":"old answer"},{"role":"user","content":"current request"},{"role":"assistant","content":"current answer"},{"role":"user","content":"new request"}]}`)
-	rewritten, opts := manager.applyHandoffState(cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: updated}, claudeHandoffOptions(), []string{"claude"})
+	rewritten, opts := manager.applyClaudeHandoffState(cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: updated}, claudeHandoffOptions(), []string{"claude"})
 	if opts.OriginalRequest == nil {
-		t.Fatal("applyHandoffState did not update OriginalRequest")
+		t.Fatal("applyClaudeHandoffState did not update OriginalRequest")
 	}
 	text := string(rewritten.Payload)
 	for _, want := range []string{"current request", "current answer", "new request"} {
@@ -286,7 +286,7 @@ func TestRewriteClaudeHandoffPayloadRejectsMissingMessages(t *testing.T) {
 	}
 }
 
-func TestHandoffSummaryTagIsValidJSONContent(t *testing.T) {
+func TestClaudeHandoffSummaryTagIsValidJSONContent(t *testing.T) {
 	payload, err := rewriteClaudeHandoffPayload([]byte(`{"messages":[{"role":"user","content":"latest"}]}`), `{"goal":"x"}`, 1)
 	if err != nil {
 		t.Fatalf("rewriteClaudeHandoffPayload() error = %v", err)
@@ -297,19 +297,19 @@ func TestHandoffSummaryTagIsValidJSONContent(t *testing.T) {
 	}
 }
 
-func TestHandoffConfigDefaultsDoNotMutateInput(t *testing.T) {
-	cfg := &internalconfig.Config{Routing: internalconfig.RoutingConfig{Handoff: internalconfig.HandoffConfig{Enabled: true}}}
-	before := cfg.Routing.Handoff
-	got := handoffConfig(cfg)
-	if !reflect.DeepEqual(before, cfg.Routing.Handoff) {
-		t.Fatal("handoffConfig mutated the runtime configuration")
+func TestClaudeHandoffConfigDefaultsDoNotMutateInput(t *testing.T) {
+	cfg := &internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{Enabled: true}}}
+	before := cfg.Routing.ClaudeHandoff
+	got := claudeHandoffConfig(cfg)
+	if !reflect.DeepEqual(before, cfg.Routing.ClaudeHandoff) {
+		t.Fatal("claudeHandoffConfig mutated the runtime configuration")
 	}
 	if got.CompactorProvider != "codex" || got.CompactorModel != "gpt-6.1-sol" || got.CompactorMaxOutputTokens != 8192 || got.KeepRecentMessages != 8 || got.MaxSummaryBytes <= 0 {
-		t.Fatalf("handoffConfig defaults = %+v", got)
+		t.Fatalf("claudeHandoffConfig defaults = %+v", got)
 	}
 }
 
-func TestIsTemporaryHandoffError(t *testing.T) {
+func TestIsTemporaryClaudeHandoffError(t *testing.T) {
 	for _, tt := range []struct {
 		name string
 		err  error
@@ -327,29 +327,31 @@ func TestIsTemporaryHandoffError(t *testing.T) {
 		{name: "no compactor auth", err: &Error{Code: "auth_not_found", Message: "no auth available"}, want: false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isTemporaryHandoffError(tt.err); got != tt.want {
-				t.Fatalf("isTemporaryHandoffError() = %v, want %v", got, tt.want)
+			if got := isTemporaryClaudeHandoffError(tt.err); got != tt.want {
+				t.Fatalf("isTemporaryClaudeHandoffError() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-type handoffRetryExecutor struct {
+type claudeHandoffRetryExecutor struct {
 	calls atomic.Int32
 }
 
-func (*handoffRetryExecutor) Identifier() string                                   { return "codex" }
-func (*handoffRetryExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) { return auth, nil }
-func (*handoffRetryExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (*claudeHandoffRetryExecutor) Identifier() string { return "codex" }
+func (*claudeHandoffRetryExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+func (*claudeHandoffRetryExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
 }
-func (*handoffRetryExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (*claudeHandoffRetryExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
 }
-func (*handoffRetryExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+func (*claudeHandoffRetryExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
 	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
 }
-func (e *handoffRetryExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *claudeHandoffRetryExecutor) Execute(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	if e.calls.Add(1) == 1 {
 		return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusServiceUnavailable, Message: "temporary compactor outage"}
 	}
@@ -358,23 +360,23 @@ func (e *handoffRetryExecutor) Execute(context.Context, *Auth, cliproxyexecutor.
 
 func TestCompactClaudeContextRetriesTemporaryCompactorFailure(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	executor := &handoffRetryExecutor{}
+	executor := &claudeHandoffRetryExecutor{}
 	manager.RegisterExecutor(executor)
 	model := "gpt-6.1-sol"
-	authID := "handoff-compactor-auth"
+	authID := "claude-handoff-compactor-auth"
 	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
 	if _, err := manager.Register(context.Background(), &Auth{ID: authID, Provider: "codex", Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
-	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{Handoff: internalconfig.HandoffConfig{
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
 		Enabled: true, CompactorProvider: "codex", CompactorModel: model, CompactorRetryMaxInterval: 1,
 	}}})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	summary, err := manager.compactClaudeContext(ctx, []byte(`{"messages":[{"role":"user","content":"keep"}]}`), claudeHandoffOptions(), handoffConfig(manager.runtimeConfigSnapshot()))
+	summary, err := manager.compactClaudeHandoffContext(ctx, []byte(`{"messages":[{"role":"user","content":"keep"}]}`), claudeHandoffOptions(), claudeHandoffConfig(manager.runtimeConfigSnapshot()))
 	if err != nil {
-		t.Fatalf("compactClaudeContext() error = %v", err)
+		t.Fatalf("compactClaudeHandoffContext() error = %v", err)
 	}
 	if summary != `{"goal":"continue"}` {
 		t.Fatalf("summary = %q", summary)
@@ -384,21 +386,23 @@ func TestCompactClaudeContextRetriesTemporaryCompactorFailure(t *testing.T) {
 	}
 }
 
-type handoffFlowExecutor struct{}
+type claudeHandoffFlowExecutor struct{}
 
-func (e *handoffFlowExecutor) Identifier() string                                   { return "claude" }
-func (e *handoffFlowExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) { return auth, nil }
-func (e *handoffFlowExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *claudeHandoffFlowExecutor) Identifier() string { return "claude" }
+func (e *claudeHandoffFlowExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+func (e *claudeHandoffFlowExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
 }
-func (e *handoffFlowExecutor) ExecuteStream(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (e *claudeHandoffFlowExecutor) ExecuteStream(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
 	switch auth.ID {
 	case "claude-a":
 		chunks <- cliproxyexecutor.StreamChunk{Err: claudeQuotaError("This request would exceed your account's rate limit. Please try again later.", http.StatusTooManyRequests)}
 	case "claude-b":
-		if !isAlreadyHandoffCompacted(req.Payload) {
-			chunks <- cliproxyexecutor.StreamChunk{Err: &Error{HTTPStatus: http.StatusBadRequest, Message: "stream handoff envelope missing"}}
+		if !isAlreadyClaudeHandoffCompacted(req.Payload) {
+			chunks <- cliproxyexecutor.StreamChunk{Err: &Error{HTTPStatus: http.StatusBadRequest, Message: "stream Claude handoff envelope missing"}}
 		} else {
 			chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"ok":true}`)}
 		}
@@ -408,47 +412,47 @@ func (e *handoffFlowExecutor) ExecuteStream(_ context.Context, auth *Auth, req c
 	close(chunks)
 	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
 }
-func (e *handoffFlowExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+func (e *claudeHandoffFlowExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
 	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
 }
-func (e *handoffFlowExecutor) Execute(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *claudeHandoffFlowExecutor) Execute(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	if auth.ID == "claude-a" {
 		return cliproxyexecutor.Response{}, claudeQuotaError("This request would exceed your account's rate limit. Please try again later.", http.StatusTooManyRequests)
 	}
 	if auth.ID == "claude-b" {
-		if !isAlreadyHandoffCompacted(req.Payload) {
-			return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusBadRequest, Message: "handoff envelope missing: " + string(req.Payload)}
+		if !isAlreadyClaudeHandoffCompacted(req.Payload) {
+			return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusBadRequest, Message: "Claude handoff envelope missing: " + string(req.Payload)}
 		}
 		return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
 	}
 	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotFound, Message: "unexpected Claude auth"}
 }
 
-type handoffFlowCompactorExecutor struct{}
+type claudeHandoffFlowCompactorExecutor struct{}
 
-func (e *handoffFlowCompactorExecutor) Identifier() string { return "codex" }
-func (e *handoffFlowCompactorExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+func (e *claudeHandoffFlowCompactorExecutor) Identifier() string { return "codex" }
+func (e *claudeHandoffFlowCompactorExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
 	return auth, nil
 }
-func (e *handoffFlowCompactorExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *claudeHandoffFlowCompactorExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
 }
-func (e *handoffFlowCompactorExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+func (e *claudeHandoffFlowCompactorExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
 }
-func (e *handoffFlowCompactorExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+func (e *claudeHandoffFlowCompactorExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
 	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
 }
-func (e *handoffFlowCompactorExecutor) Execute(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *claudeHandoffFlowCompactorExecutor) Execute(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	if gjson.GetBytes(req.Payload, "reasoning.effort").String() != "xhigh" {
 		return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusBadRequest, Message: "compactor reasoning was not xhigh"}
 	}
 	return cliproxyexecutor.Response{Payload: []byte(`{"output":[{"content":[{"text":"{\"goal\":\"continue\",\"pending_tasks\":[\"finish request\"]}"}]}]}`)}, nil
 }
 
-type handoffFlowSelector struct{}
+type claudeHandoffFlowSelector struct{}
 
-func (handoffFlowSelector) Pick(_ context.Context, _ string, _ string, _ cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
+func (claudeHandoffFlowSelector) Pick(_ context.Context, _ string, _ string, _ cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	var selected *Auth
 	for _, auth := range auths {
 		if auth != nil && (selected == nil || auth.ID < selected.ID) {
@@ -462,11 +466,11 @@ func (handoffFlowSelector) Pick(_ context.Context, _ string, _ string, _ cliprox
 }
 
 func TestExecuteClaudeQuotaCompactsBeforeSelectingNextOAuthAccount(t *testing.T) {
-	manager := NewManager(nil, handoffFlowSelector{}, nil)
+	manager := NewManager(nil, claudeHandoffFlowSelector{}, nil)
 	manager.SetRetryConfig(0, 0, 0)
-	manager.RegisterExecutor(&handoffFlowExecutor{})
-	manager.RegisterExecutor(&handoffFlowCompactorExecutor{})
-	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{Handoff: internalconfig.HandoffConfig{
+	manager.RegisterExecutor(&claudeHandoffFlowExecutor{})
+	manager.RegisterExecutor(&claudeHandoffFlowCompactorExecutor{})
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
 		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6.1-sol", KeepRecentMessages: 2,
 	}}})
 	for _, entry := range []struct {
@@ -494,7 +498,7 @@ func TestExecuteClaudeQuotaCompactsBeforeSelectingNextOAuthAccount(t *testing.T)
 		SourceFormat:    sdktranslator.FormatClaude,
 		OriginalRequest: payload,
 		Metadata: map[string]any{
-			cliproxyexecutor.CanonicalSessionIDMetadataKey: "handoff-flow-session",
+			cliproxyexecutor.CanonicalSessionIDMetadataKey: "claude-handoff-flow-session",
 		},
 	})
 	if err != nil {
@@ -506,11 +510,11 @@ func TestExecuteClaudeQuotaCompactsBeforeSelectingNextOAuthAccount(t *testing.T)
 }
 
 func TestExecuteStreamClaudeQuotaCompactsBootstrapErrorBeforeNextOAuthAccount(t *testing.T) {
-	manager := NewManager(nil, handoffFlowSelector{}, nil)
+	manager := NewManager(nil, claudeHandoffFlowSelector{}, nil)
 	manager.SetRetryConfig(0, 0, 0)
-	manager.RegisterExecutor(&handoffFlowExecutor{})
-	manager.RegisterExecutor(&handoffFlowCompactorExecutor{})
-	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{Handoff: internalconfig.HandoffConfig{
+	manager.RegisterExecutor(&claudeHandoffFlowExecutor{})
+	manager.RegisterExecutor(&claudeHandoffFlowCompactorExecutor{})
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
 		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6.1-sol", KeepRecentMessages: 2,
 	}}})
 	for _, entry := range []struct {
@@ -539,7 +543,7 @@ func TestExecuteStreamClaudeQuotaCompactsBootstrapErrorBeforeNextOAuthAccount(t 
 		OriginalRequest: payload,
 		Stream:          true,
 		Metadata: map[string]any{
-			cliproxyexecutor.CanonicalSessionIDMetadataKey: "handoff-stream-session",
+			cliproxyexecutor.CanonicalSessionIDMetadataKey: "claude-handoff-stream-session",
 		},
 	})
 	if err != nil {
@@ -557,7 +561,7 @@ func TestExecuteStreamClaudeQuotaCompactsBootstrapErrorBeforeNextOAuthAccount(t 
 	}
 }
 
-func TestHandoffRetryDelayIsBoundedAndUsesRetryAfter(t *testing.T) {
+func TestClaudeHandoffRetryDelayIsBoundedAndUsesRetryAfter(t *testing.T) {
 	for _, tt := range []struct {
 		attempt int
 		want    time.Duration
@@ -567,17 +571,17 @@ func TestHandoffRetryDelayIsBoundedAndUsesRetryAfter(t *testing.T) {
 		{attempt: 4, want: 16 * time.Second},
 		{attempt: 10, want: 30 * time.Second},
 	} {
-		if got := handoffRetryDelay(nil, tt.attempt, 30*time.Second); got != tt.want {
-			t.Fatalf("handoffRetryDelay(attempt=%d) = %v, want %v", tt.attempt, got, tt.want)
+		if got := claudeHandoffRetryDelay(nil, tt.attempt, 30*time.Second); got != tt.want {
+			t.Fatalf("claudeHandoffRetryDelay(attempt=%d) = %v, want %v", tt.attempt, got, tt.want)
 		}
 	}
 	retryAfter := 10 * time.Second
 	err := customStatusError{code: http.StatusTooManyRequests, retryAfter: &retryAfter}
-	if got := handoffRetryDelay(err, 0, 30*time.Second); got != retryAfter {
+	if got := claudeHandoffRetryDelay(err, 0, 30*time.Second); got != retryAfter {
 		t.Fatalf("RetryAfter delay = %v, want %v", got, retryAfter)
 	}
 	retryAfter = time.Hour
-	if got := handoffRetryDelay(err, 0, 30*time.Second); got != 30*time.Second {
+	if got := claudeHandoffRetryDelay(err, 0, 30*time.Second); got != 30*time.Second {
 		t.Fatalf("capped RetryAfter delay = %v, want 30s", got)
 	}
 }

@@ -372,15 +372,15 @@ type RoutingConfig struct {
 	// Default: true. Ignored when SessionAffinity is false.
 	SessionAffinitySubagents *bool `yaml:"session-affinity-subagents,omitempty" json:"session-affinity-subagents,omitempty"`
 
-	// Handoff configures quota-triggered context compaction for Claude Messages
+	// ClaudeHandoff configures quota-triggered context compaction for Claude Messages
 	// requests. The feature is opt-in because it sends the conversation body to
 	// the configured compactor provider and changes the request transcript seen
 	// by the next Claude credential.
-	Handoff HandoffConfig `yaml:"handoff,omitempty" json:"handoff,omitempty"`
+	ClaudeHandoff ClaudeHandoffConfig `yaml:"claude-handoff,omitempty" json:"claude-handoff,omitempty"`
 }
 
-// HandoffConfig configures the Claude OAuth quota handoff path.
-type HandoffConfig struct {
+// ClaudeHandoffConfig configures the Claude OAuth quota handoff path.
+type ClaudeHandoffConfig struct {
 	// Enabled enables quota-triggered context compaction and failover.
 	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	// CompactorProvider is the provider key used for the summary request.

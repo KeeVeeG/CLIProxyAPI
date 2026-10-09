@@ -165,13 +165,13 @@ routing:
   # Ignored when routing.session-affinity is false.
   session-affinity-subagents: true
 
-  # Quota handoff for Claude OAuth accounts. When Claude returns the exact
+  # Claude quota handoff for Claude OAuth accounts. When Claude returns the exact
   # rate-limit response for the current request, CLIProxyAPI pauses failover,
   # compacts the full Claude request through the OpenAI OAuth route, then sends
   # the compacted transcript to the next Claude credential. The feature is
   # opt-in and fail-closed by default so a failed compaction never silently
   # sends the full transcript to another account.
-  handoff:
+  claude-handoff:
     enabled: false
     compactor-provider: "codex"
     compactor-model: "gpt-6.1-sol"
