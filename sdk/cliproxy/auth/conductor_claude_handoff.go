@@ -489,9 +489,13 @@ func (m *Manager) performClaudeHandoff(ctx context.Context, req cliproxyexecutor
 	lock.Lock()
 	defer lock.Unlock()
 	if state, ok := claudeHandoffSummaryFromState(m, sessionID); ok {
-		payload := opts.OriginalRequest
+		// req.Payload is the current request after any prior handoff rewrite.
+		// opts.OriginalRequest can still be the full inbound Claude transcript;
+		// using it here can send hundreds of thousands of stale tokens to the
+		// compactor even though the current Claude request is already compact.
+		payload := req.Payload
 		if len(payload) == 0 {
-			payload = req.Payload
+			payload = opts.OriginalRequest
 		}
 		// Once a request already contains a Claude handoff envelope, compact the
 		// current envelope again. This prevents a long-running session from
@@ -510,9 +514,12 @@ func (m *Manager) performClaudeHandoff(ctx context.Context, req cliproxyexecutor
 		}
 		return rewriteClaudeHandoffPayloadWithState(payload, state, cfg.KeepRecentMessages)
 	}
-	original := opts.OriginalRequest
+	// Compact the current Claude payload. OriginalRequest is retained for
+	// translation/session bookkeeping and may contain the unbounded inbound
+	// transcript, while req.Payload is the payload selected for this attempt.
+	original := req.Payload
 	if len(original) == 0 {
-		original = req.Payload
+		original = opts.OriginalRequest
 	}
 	if len(original) == 0 {
 		return nil, fmt.Errorf("Claude handoff has no original request body")

@@ -450,6 +450,60 @@ func (e *claudeHandoffFlowCompactorExecutor) Execute(_ context.Context, _ *Auth,
 	return cliproxyexecutor.Response{Payload: []byte(`{"output":[{"content":[{"text":"{\"goal\":\"continue\",\"pending_tasks\":[\"finish request\"]}"}]}]}`)}, nil
 }
 
+type claudeHandoffPayloadRecordingCompactorExecutor struct {
+	payload []byte
+}
+
+func (e *claudeHandoffPayloadRecordingCompactorExecutor) Identifier() string { return "codex" }
+func (e *claudeHandoffPayloadRecordingCompactorExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+func (*claudeHandoffPayloadRecordingCompactorExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
+}
+func (*claudeHandoffPayloadRecordingCompactorExecutor) ExecuteStream(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
+}
+func (*claudeHandoffPayloadRecordingCompactorExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
+}
+func (e *claudeHandoffPayloadRecordingCompactorExecutor) Execute(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.payload = append(e.payload[:0], req.Payload...)
+	return cliproxyexecutor.Response{Payload: []byte(`{"output":[{"content":[{"text":"{\"goal\":\"continue\"}"}]}]}`)}, nil
+}
+
+func TestPerformClaudeHandoffCompactsCurrentPayloadInsteadOfOriginalRequest(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	recorder := &claudeHandoffPayloadRecordingCompactorExecutor{}
+	manager.RegisterExecutor(recorder)
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
+		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6.1-sol",
+	}}})
+	const authID = "claude-handoff-current-payload-compactor-auth"
+	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "gpt-6.1-sol"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+	if _, err := manager.Register(context.Background(), &Auth{ID: authID, Provider: "codex", Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+
+	oversizedOriginal := []byte(`{"messages":[{"role":"user","content":"oversized-` + strings.Repeat("x", 512*1024) + `"}]}`)
+	currentPayload := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"current request"}]}`)
+	opts := claudeHandoffOptions()
+	opts.OriginalRequest = oversizedOriginal
+	opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = "claude-current-payload-session"
+	if _, err := manager.performClaudeHandoff(context.Background(), cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: currentPayload}, opts, claudeQuotaError("quota", http.StatusTooManyRequests)); err != nil {
+		t.Fatalf("performClaudeHandoff() error = %v", err)
+	}
+
+	compactorText := gjson.GetBytes(recorder.payload, "input.0.content.0.text").String()
+	if !strings.Contains(compactorText, "current request") {
+		t.Fatalf("compactor did not receive current payload: %s", compactorText)
+	}
+	if strings.Contains(compactorText, "oversized-") || len(recorder.payload) >= len(oversizedOriginal) {
+		t.Fatalf("compactor received oversized OriginalRequest: payload bytes=%d original bytes=%d", len(recorder.payload), len(oversizedOriginal))
+	}
+}
+
 type claudeHandoffFlowSelector struct{}
 
 func (claudeHandoffFlowSelector) Pick(_ context.Context, _ string, _ string, _ cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {

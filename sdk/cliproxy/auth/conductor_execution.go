@@ -672,7 +672,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				}
 				if !claudeHandoffAttempted && claudeHandoffConfig(m.runtimeConfigSnapshot()).Enabled && isClaudeHandoffCandidate(provider, execOpts, errExec) {
 					claudeHandoffAttempted = true
-					compacted, errClaudeHandoff := m.performClaudeHandoff(execCtx, req, execOpts, errExec)
+					compacted, errClaudeHandoff := m.performClaudeHandoff(execCtx, execReq, execOpts, errExec)
 					if errClaudeHandoff != nil {
 						if !claudeHandoffConfig(m.runtimeConfigSnapshot()).FailOpen {
 							return cliproxyexecutor.Response{}, errClaudeHandoff
@@ -1255,7 +1255,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			if !homeMode && !claudeHandoffAttempted && claudeHandoffConfig(m.runtimeConfigSnapshot()).Enabled && isClaudeHandoffCandidate(provider, execOpts, errStream) {
 				claudeHandoffAttempted = true
-				compacted, errClaudeHandoff := m.performClaudeHandoff(execCtx, req, execOpts, errStream)
+				compacted, errClaudeHandoff := m.performClaudeHandoff(execCtx, execReq, execOpts, errStream)
 				if errClaudeHandoff != nil {
 					if !claudeHandoffConfig(m.runtimeConfigSnapshot()).FailOpen {
 						return nil, errClaudeHandoff
