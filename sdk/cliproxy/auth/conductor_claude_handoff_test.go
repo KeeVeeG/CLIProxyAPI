@@ -98,7 +98,7 @@ func TestSplitClaudeHandoffPayloadEscapedGiantMessageStaysBelowLimit(t *testing.
 		"model": "claude-opus-5-5",
 		"messages": []map[string]any{{
 			"role":    "user",
-			"content": strings.Repeat(`quote " slash \\ tool_result Ж `, 12000),
+			"content": strings.Repeat(`quote " slash \\ tool_result Ж 🧪 `, 12000),
 		}, {
 			"role":    "user",
 			"content": "latest request",
@@ -126,12 +126,12 @@ func TestSplitClaudeHandoffPayloadEscapedGiantMessageStaysBelowLimit(t *testing.
 
 func TestClaudeHandoffCompactorPayloadDropsRequestToolSchemas(t *testing.T) {
 	payload, err := json.Marshal(map[string]any{
-		"model": "claude-opus-5-5",
-		"system": []map[string]any{{"type": "text", "text": "keep system context"}},
-		"tools": []map[string]any{{"name": "large_tool", "description": strings.Repeat("schema ", 1000)}},
-		"tool_choice": map[string]any{"type": "auto"},
+		"model":               "claude-opus-5-5",
+		"system":              []map[string]any{{"type": "text", "text": "keep system context"}},
+		"tools":               []map[string]any{{"name": "large_tool", "description": strings.Repeat("schema ", 1000)}},
+		"tool_choice":         map[string]any{"type": "auto"},
 		"parallel_tool_calls": true,
-		"messages": []map[string]any{{"role": "user", "content": "keep conversation"}},
+		"messages":            []map[string]any{{"role": "user", "content": "keep conversation"}},
 	})
 	if err != nil {
 		t.Fatalf("json.Marshal() error = %v", err)
@@ -148,6 +148,39 @@ func TestClaudeHandoffCompactorPayloadDropsRequestToolSchemas(t *testing.T) {
 	}
 	if gjson.GetBytes(payload, "tools").IsArray() == false {
 		t.Fatalf("test payload unexpectedly lost original tools: %s", payload)
+	}
+}
+
+func TestClaudeHandoffCompactorChunksDoNotRepeatToolSchemas(t *testing.T) {
+	payload, err := json.Marshal(map[string]any{
+		"model": "claude-opus-5-5",
+		"tools": []map[string]any{{"name": "large_tool", "description": strings.Repeat("schema ", 20000)}},
+		"messages": []map[string]any{{
+			"role":    "user",
+			"content": strings.Repeat("large tool output ", 40000),
+		}, {"role": "user", "content": "latest request"}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	compactorPayload, err := claudeHandoffCompactorPayload(payload)
+	if err != nil {
+		t.Fatalf("claudeHandoffCompactorPayload() error = %v", err)
+	}
+	chunks, err := splitClaudeHandoffPayload(compactorPayload, claudeHandoffCompactorChunkBytes)
+	if err != nil {
+		t.Fatalf("splitClaudeHandoffPayload() error = %v", err)
+	}
+	if len(chunks) > 4 {
+		t.Fatalf("chunks = %d, want at most 4 after removing repeated tool schemas", len(chunks))
+	}
+	for index, chunk := range chunks {
+		if gjson.GetBytes(chunk, "tools").Exists() {
+			t.Fatalf("chunk %d still contains tools", index)
+		}
+		if len(chunk) > claudeHandoffCompactorChunkBytes {
+			t.Fatalf("chunk %d has %d bytes, want <= %d", index, len(chunk), claudeHandoffCompactorChunkBytes)
+		}
 	}
 }
 
