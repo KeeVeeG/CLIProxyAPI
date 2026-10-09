@@ -2226,8 +2226,8 @@ func claudeHandoffSummaryCacheBlock(block gjson.Result) bool {
 		return false
 	}
 	text := block.Get("text").String()
-	return strings.Contains(text, "<cli-proxy-claude-handoff>") ||
-		strings.Contains(text, "\\u003ccli-proxy-claude-handoff\\u003e")
+	return strings.HasPrefix(text, "<cli-proxy-claude-handoff>") &&
+		strings.Contains(text, "</cli-proxy-claude-handoff>")
 }
 
 func claudeBodyHasHandoffSummary(payload []byte) bool {
