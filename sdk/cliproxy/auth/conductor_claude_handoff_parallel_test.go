@@ -215,6 +215,16 @@ func TestClaudeHandoffCompactorParallelChunksPreserveOrderAndBoundConcurrency(t 
 	if got := int(executor.calls.Load()); got != len(chunks) {
 		t.Fatalf("compactor calls = %d, want exactly one per chunk (%d)", got, len(chunks))
 	}
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if len(executor.authIDs) != len(chunks) {
+		t.Fatalf("recorded auth selections = %d, want %d", len(executor.authIDs), len(chunks))
+	}
+	for index, authID := range executor.authIDs[1:] {
+		if authID != executor.authIDs[0] {
+			t.Fatalf("chunk %d used auth %q, want probe auth %q", index+1, authID, executor.authIDs[0])
+		}
+	}
 }
 
 func TestClaudeHandoffCompactorParallelChunksCancelSiblings(t *testing.T) {
