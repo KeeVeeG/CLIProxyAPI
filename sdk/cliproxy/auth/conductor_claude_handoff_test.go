@@ -453,6 +453,7 @@ func (e *claudeHandoffFlowCompactorExecutor) Execute(_ context.Context, _ *Auth,
 type claudeHandoffPayloadRecordingCompactorExecutor struct {
 	payload  []byte
 	metadata map[string]any
+	calls    atomic.Int32
 }
 
 func (e *claudeHandoffPayloadRecordingCompactorExecutor) Identifier() string { return "codex" }
@@ -469,6 +470,7 @@ func (*claudeHandoffPayloadRecordingCompactorExecutor) HttpRequest(context.Conte
 	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
 }
 func (e *claudeHandoffPayloadRecordingCompactorExecutor) Execute(_ context.Context, _ *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	e.calls.Add(1)
 	e.payload = append(e.payload[:0], req.Payload...)
 	e.metadata = opts.Metadata
 	return cliproxyexecutor.Response{Payload: []byte(`{"output":[{"content":[{"text":"{\"goal\":\"continue\"}"}]}]}`)}, nil
@@ -573,6 +575,175 @@ func TestExecuteClaudeQuotaCompactsBeforeSelectingNextOAuthAccount(t *testing.T)
 	}
 	if string(resp.Payload) != `{"ok":true}` {
 		t.Fatalf("final response = %s", resp.Payload)
+	}
+}
+
+type claudeHandoffThreeAccountExecutor struct {
+	nonStreamPayloads map[string][]byte
+	streamPayloads    map[string][]byte
+}
+
+func (e *claudeHandoffThreeAccountExecutor) Identifier() string { return "claude" }
+func (e *claudeHandoffThreeAccountExecutor) Refresh(_ context.Context, auth *Auth) (*Auth, error) {
+	return auth, nil
+}
+func (*claudeHandoffThreeAccountExecutor) CountTokens(context.Context, *Auth, cliproxyexecutor.Request, cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
+}
+func (e *claudeHandoffThreeAccountExecutor) ExecuteStream(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
+	if e.streamPayloads == nil {
+		e.streamPayloads = make(map[string][]byte)
+	}
+	e.streamPayloads[auth.ID] = append([]byte(nil), req.Payload...)
+	chunks := make(chan cliproxyexecutor.StreamChunk, 1)
+	switch auth.ID {
+	case "claude-a", "claude-b":
+		chunks <- cliproxyexecutor.StreamChunk{Err: claudeQuotaError("This request would exceed your account's rate limit. Please try again later.", http.StatusTooManyRequests)}
+	case "claude-c":
+		if !isAlreadyClaudeHandoffCompacted(req.Payload) {
+			chunks <- cliproxyexecutor.StreamChunk{Err: &Error{HTTPStatus: http.StatusBadRequest, Message: "stream handoff payload missing"}}
+		} else {
+			chunks <- cliproxyexecutor.StreamChunk{Payload: []byte(`{"ok":true}`)}
+		}
+	default:
+		chunks <- cliproxyexecutor.StreamChunk{Err: &Error{HTTPStatus: http.StatusNotFound, Message: "unexpected Claude auth"}}
+	}
+	close(chunks)
+	return &cliproxyexecutor.StreamResult{Chunks: chunks}, nil
+}
+func (*claudeHandoffThreeAccountExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
+	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
+}
+func (e *claudeHandoffThreeAccountExecutor) Execute(_ context.Context, auth *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+	if e.nonStreamPayloads == nil {
+		e.nonStreamPayloads = make(map[string][]byte)
+	}
+	e.nonStreamPayloads[auth.ID] = append([]byte(nil), req.Payload...)
+	switch auth.ID {
+	case "claude-a", "claude-b":
+		return cliproxyexecutor.Response{}, claudeQuotaError("This request would exceed your account's rate limit. Please try again later.", http.StatusTooManyRequests)
+	case "claude-c":
+		if !isAlreadyClaudeHandoffCompacted(req.Payload) {
+			return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusBadRequest, Message: "handoff payload missing"}
+		}
+		return cliproxyexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
+	default:
+		return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusNotFound, Message: "unexpected Claude auth"}
+	}
+}
+
+func registerThreeClaudeHandoffAccounts(t *testing.T, manager *Manager, compactor *claudeHandoffPayloadRecordingCompactorExecutor) *claudeHandoffThreeAccountExecutor {
+	t.Helper()
+	executor := &claudeHandoffThreeAccountExecutor{}
+	manager.RegisterExecutor(executor)
+	manager.RegisterExecutor(compactor)
+	for _, entry := range []struct {
+		id       string
+		provider string
+		model    string
+	}{
+		{id: "claude-a", provider: "claude", model: "claude-opus-5-5"},
+		{id: "claude-b", provider: "claude", model: "claude-opus-5-5"},
+		{id: "claude-c", provider: "claude", model: "claude-opus-5-5"},
+		{id: "codex-a", provider: "codex", model: "gpt-6.1-sol"},
+	} {
+		registry.GetGlobalRegistry().RegisterClient(entry.id, entry.provider, []*registry.ModelInfo{{ID: entry.model}})
+		entryID := entry.id
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(entryID) })
+		attributes := map[string]string{}
+		if entry.provider == "claude" {
+			attributes["auth_kind"] = "oauth"
+		}
+		if _, err := manager.Register(context.Background(), &Auth{ID: entry.id, Provider: entry.provider, Status: StatusActive, Attributes: attributes, Metadata: map[string]any{"disable_cooling": true}}); err != nil {
+			t.Fatalf("Register(%s) error = %v", entry.id, err)
+		}
+	}
+	return executor
+}
+
+func claudeHandoffThreeAccountConfig() *internalconfig.Config {
+	return &internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
+		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6.1-sol", KeepRecentMessages: 2,
+	}}}
+}
+
+func TestExecuteClaudeQuotaCompactsOnceAcrossTwoFailures(t *testing.T) {
+	manager := NewManager(nil, claudeHandoffFlowSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	compactor := &claudeHandoffPayloadRecordingCompactorExecutor{}
+	executor := registerThreeClaudeHandoffAccounts(t, manager, compactor)
+	manager.SetConfig(claudeHandoffThreeAccountConfig())
+	payload := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"work"}]}`)
+	resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload,
+		Metadata: map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: "claude-three-account-nonstream"},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if string(resp.Payload) != `{"ok":true}` {
+		t.Fatalf("response = %s", resp.Payload)
+	}
+	if got := compactor.calls.Load(); got != 1 {
+		t.Fatalf("compactor calls = %d, want exactly one", got)
+	}
+	for _, authID := range []string{"claude-b", "claude-c"} {
+		if !isAlreadyClaudeHandoffCompacted(executor.nonStreamPayloads[authID]) {
+			t.Fatalf("%s did not receive compacted payload", authID)
+		}
+	}
+}
+
+func TestExecuteStreamClaudeQuotaCompactsOnceAcrossTwoFailures(t *testing.T) {
+	manager := NewManager(nil, claudeHandoffFlowSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	compactor := &claudeHandoffPayloadRecordingCompactorExecutor{}
+	executor := &claudeHandoffThreeAccountExecutor{}
+	manager.RegisterExecutor(executor)
+	manager.RegisterExecutor(compactor)
+	for _, entry := range []struct{ id, provider, model string }{
+		{id: "claude-a", provider: "claude", model: "claude-opus-5-5"},
+		{id: "claude-b", provider: "claude", model: "claude-opus-5-5"},
+		{id: "claude-c", provider: "claude", model: "claude-opus-5-5"},
+		{id: "codex-a", provider: "codex", model: "gpt-6.1-sol"},
+	} {
+		registry.GetGlobalRegistry().RegisterClient(entry.id, entry.provider, []*registry.ModelInfo{{ID: entry.model}})
+		entryID := entry.id
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(entryID) })
+		attributes := map[string]string{}
+		if entry.provider == "claude" {
+			attributes["auth_kind"] = "oauth"
+		}
+		if _, err := manager.Register(context.Background(), &Auth{ID: entry.id, Provider: entry.provider, Status: StatusActive, Attributes: attributes, Metadata: map[string]any{"disable_cooling": true}}); err != nil {
+			t.Fatalf("Register(%s) error = %v", entry.id, err)
+		}
+	}
+	manager.SetConfig(claudeHandoffThreeAccountConfig())
+	payload := []byte(`{"model":"claude-opus-5-5","stream":true,"messages":[{"role":"user","content":"work"}]}`)
+	stream, err := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload, Stream: true,
+		Metadata: map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: "claude-three-account-stream"},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	var received []byte
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		received = append(received, chunk.Payload...)
+	}
+	if string(received) != `{"ok":true}` {
+		t.Fatalf("stream response = %s", received)
+	}
+	if got := compactor.calls.Load(); got != 1 {
+		t.Fatalf("compactor calls = %d, want exactly one", got)
+	}
+	for _, authID := range []string{"claude-b", "claude-c"} {
+		if !isAlreadyClaudeHandoffCompacted(executor.streamPayloads[authID]) {
+			t.Fatalf("%s did not receive compacted stream payload", authID)
+		}
 	}
 }
 
