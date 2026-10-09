@@ -23,9 +23,11 @@ import (
 const (
 	claudeHandoffInternalMetadataKey  = "cliproxy.claude_handoff.internal"
 	claudeHandoffCompactedMetadataKey = "cliproxy.claude_handoff.compacted"
-	// Keep compactor input conservative. The full Claude transcript is embedded
-	// in one input_text item and JSON escaping adds overhead before tokenization.
-	claudeHandoffCompactorChunkBytes = 512 * 1024
+	// Keep compactor input below the effective gpt-6.1-sol window while avoiding
+	// dozens of serial calls for giant tool results. Request-only tool schemas
+	// are removed before splitting, and a context-too-large response halves the
+	// limit for that chunk and retries it.
+	claudeHandoffCompactorChunkBytes = 768 * 1024
 	claudeHandoffSummaryTag          = "<cli-proxy-claude-handoff>"
 	claudeHandoffSummaryEndTag       = "</cli-proxy-claude-handoff>"
 	claudeHandoffIdleCompactAfter    = 30 * time.Minute
@@ -463,6 +465,16 @@ func claudeHandoffPayloadWithMessages(payload []byte, messages []json.RawMessage
 	return sjson.SetRawBytes(payload, "messages", base)
 }
 
+func claudeHandoffUTF8End(raw string, start, end int) int {
+	if end >= len(raw) {
+		return len(raw)
+	}
+	for end > start && !utf8.ValidString(raw[start:end]) {
+		end--
+	}
+	return end
+}
+
 // claudeHandoffCompactorPayload removes request-only tool schemas before a
 // transcript is split for the internal compactor. Tool definitions are useful
 // to Claude while executing the request, but they do not add conversation
@@ -557,19 +569,15 @@ func splitClaudeHandoffPayload(payload []byte, maxBytes int) ([][]byte, error) {
 			if end > len(raw) {
 				end = len(raw)
 			}
-			// Raw JSON is valid UTF-8, but a byte budget can land in the
-			// middle of a multi-byte character. Keep synthetic fragments valid
-			// UTF-8 so json.Marshal does not replace data with U+FFFD.
-			for end > start && end < len(raw) && !utf8.ValidString(raw[start:end]) {
-				end--
-			}
-			if end == start {
-				end = start + fragmentBytes
-				if end > len(raw) {
-					end = len(raw)
-				}
-			}
 			for {
+				// Raw JSON is valid UTF-8, but a byte budget (including each
+				// adaptive halving step) can land in the middle of a multi-byte
+				// character. Keep every synthetic fragment valid UTF-8 so
+				// json.Marshal does not replace data with U+FFFD.
+				end = claudeHandoffUTF8End(raw, start, end)
+				if end <= start {
+					return nil, fmt.Errorf("giant Claude message fragment has no valid UTF-8 boundary")
+				}
 				fragment, _ := json.Marshal(map[string]any{
 					"role":    "user",
 					"content": fmt.Sprintf("Original Claude message fragment %d:\n%s", part, raw[start:end]),
