@@ -52,6 +52,11 @@ credential is still tried before the chunk is reduced. This is needed because
 the effective `gpt-6-luna` request window can be smaller than the larger
 client-advertised maximum.
 
+The first chunk is executed serially to find a working OAuth credential. The
+remaining chunks then run in a bounded batch of five requests pinned to that
+credential, preserving summary order. A temporary failure releases the pin for
+that chunk so normal credential rotation can continue.
+
 Claude handoff state is keyed by the normalized session/conversation ID already
 extracted by CLIProxyAPI. After a proxy restart, the first request that already
 contains conversation history is compacted before the first Claude account is

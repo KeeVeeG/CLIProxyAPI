@@ -21,16 +21,18 @@ import (
 )
 
 const (
-	claudeHandoffInternalMetadataKey  = "cliproxy.claude_handoff.internal"
-	claudeHandoffCompactedMetadataKey = "cliproxy.claude_handoff.compacted"
+	claudeHandoffInternalMetadataKey   = "cliproxy.claude_handoff.internal"
+	claudeHandoffCompactedMetadataKey  = "cliproxy.claude_handoff.compacted"
+	claudeHandoffDynamicPinMetadataKey = "cliproxy.claude_handoff.dynamic_pin"
 	// Use a larger chunk to keep long Claude requests within the client's
 	// request timeout. Request-only tool schemas are removed before splitting,
 	// and a context-too-large response halves the limit for that chunk and
 	// retries it, so a dense chunk remains safe.
-	claudeHandoffCompactorChunkBytes = 768 * 1024
-	claudeHandoffSummaryTag          = "<cli-proxy-claude-handoff>"
-	claudeHandoffSummaryEndTag       = "</cli-proxy-claude-handoff>"
-	claudeHandoffIdleCompactAfter    = 30 * time.Minute
+	claudeHandoffCompactorChunkBytes  = 768 * 1024
+	claudeHandoffCompactorParallelism = 5
+	claudeHandoffSummaryTag           = "<cli-proxy-claude-handoff>"
+	claudeHandoffSummaryEndTag        = "</cli-proxy-claude-handoff>"
+	claudeHandoffIdleCompactAfter     = 30 * time.Minute
 )
 
 type claudeHandoffState struct {
@@ -648,22 +650,115 @@ func (m *Manager) compactClaudeHandoffContextWithLimit(ctx context.Context, orig
 	if err != nil {
 		return "", err
 	}
-	summaries := make([]string, 0, len(chunks))
-	for _, chunk := range chunks {
-		summary, errCompact := m.compactClaudeHandoffChunk(ctx, chunk, opts, cfg)
-		if errCompact != nil && claudeHandoffContextTooLarge(errCompact) && depth < 5 && maxBytes > 16*1024 {
-			summary, errCompact = m.compactClaudeHandoffContextWithLimit(ctx, chunk, opts, cfg, maxBytes/2, depth+1)
+	summaries := make([]string, len(chunks))
+	workerCount := claudeHandoffCompactorParallelism
+	if workerCount > len(chunks) {
+		workerCount = len(chunks)
+	}
+	if workerCount < 1 {
+		return "", fmt.Errorf("Claude handoff compactor produced no chunks")
+	}
+	// Resolve one working OAuth account before starting the batch. This avoids
+	// five workers racing through the credential pool at startup. The selected
+	// account is pinned for the batch; if it becomes temporarily unavailable,
+	// compactClaudeHandoffChunk drops the dynamic pin and resumes normal
+	// credential rotation for that chunk.
+	var probeAuthID string
+	var probeErr error
+	summaries[0], probeAuthID, probeErr = m.compactClaudeHandoffChunkSelected(ctx, chunks[0], opts, cfg)
+	if probeErr != nil {
+		if claudeHandoffContextTooLarge(probeErr) && depth < 5 && maxBytes > 16*1024 {
+			return m.compactClaudeHandoffContextWithLimit(ctx, original, opts, cfg, maxBytes/2, depth+1)
 		}
-		if errCompact != nil {
-			return "", errCompact
+		return "", probeErr
+	}
+	if len(chunks) == 1 {
+		merged := strings.TrimSpace(summaries[0])
+		if len([]byte(merged)) > cfg.MaxSummaryBytes {
+			return "", claudeHandoffPermanentError{error: fmt.Errorf("merged compactor summary exceeds %d bytes", cfg.MaxSummaryBytes)}
 		}
-		summaries = append(summaries, summary)
+		return merged, nil
+	}
+	batchOpts := opts
+	metadata := cloneSchedulerAnyMap(opts.Metadata)
+	// These callbacks usually close over the outer request's attempted-auth
+	// map. Never invoke them concurrently from compactor workers.
+	delete(metadata, cliproxyexecutor.SelectedAuthCallbackMetadataKey)
+	delete(metadata, cliproxyexecutor.SelectedAuthIndexCallbackMetadataKey)
+	if probeAuthID != "" && strings.TrimSpace(cfg.CompactorAuthID) == "" {
+		metadata[cliproxyexecutor.PinnedAuthMetadataKey] = probeAuthID
+		metadata[claudeHandoffDynamicPinMetadataKey] = true
+	}
+	batchOpts.Metadata = metadata
+	workCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	var firstErr error
+	var errMu sync.Mutex
+	worker := func() {
+		defer wg.Done()
+		for index := range jobs {
+			summary, errCompact := m.compactClaudeHandoffChunk(workCtx, chunks[index], batchOpts, cfg)
+			if errCompact != nil && claudeHandoffContextTooLarge(errCompact) && depth < 5 && maxBytes > 16*1024 {
+				summary, errCompact = m.compactClaudeHandoffContextWithLimit(workCtx, chunks[index], batchOpts, cfg, maxBytes/2, depth+1)
+			}
+			if errCompact != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = errCompact
+				}
+				errMu.Unlock()
+				return
+			}
+			summaries[index] = summary
+		}
+	}
+	wg.Add(workerCount)
+	for index := 0; index < workerCount; index++ {
+		go worker()
+	}
+	for index := 1; index < len(chunks); index++ {
+		select {
+		case jobs <- index:
+		case <-workCtx.Done():
+			break
+		}
+		if workCtx.Err() != nil {
+			break
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	errMu.Lock()
+	compactErr := firstErr
+	errMu.Unlock()
+	if compactErr != nil {
+		return "", compactErr
 	}
 	merged := strings.TrimSpace(strings.Join(summaries, "\n\n"))
 	if len([]byte(merged)) > cfg.MaxSummaryBytes {
 		return "", claudeHandoffPermanentError{error: fmt.Errorf("merged compactor summary exceeds %d bytes", cfg.MaxSummaryBytes)}
 	}
 	return merged, nil
+}
+
+func (m *Manager) compactClaudeHandoffChunkSelected(ctx context.Context, original []byte, opts cliproxyexecutor.Options, cfg internalconfig.ClaudeHandoffConfig) (string, string, error) {
+	metadata := cloneSchedulerAnyMap(opts.Metadata)
+	if metadata == nil {
+		metadata = make(map[string]any, 1)
+	}
+	previous, _ := metadata[cliproxyexecutor.SelectedAuthCallbackMetadataKey].(func(string))
+	var selectedAuthID string
+	metadata[cliproxyexecutor.SelectedAuthCallbackMetadataKey] = func(authID string) {
+		selectedAuthID = strings.TrimSpace(authID)
+		if previous != nil {
+			previous(authID)
+		}
+	}
+	opts.Metadata = metadata
+	summary, err := m.compactClaudeHandoffChunk(ctx, original, opts, cfg)
+	return summary, selectedAuthID, err
 }
 
 func (m *Manager) compactClaudeHandoffChunk(ctx context.Context, original []byte, opts cliproxyexecutor.Options, cfg internalconfig.ClaudeHandoffConfig) (string, error) {
@@ -692,6 +787,10 @@ func (m *Manager) compactClaudeHandoffChunk(ctx context.Context, original []byte
 	}
 	compactorReq := cliproxyexecutor.Request{Model: cfg.CompactorModel, Payload: compactorBody, Metadata: metadata}
 	maxInterval := time.Duration(cfg.CompactorRetryMaxInterval) * time.Second
+	dynamicPin := false
+	if value, ok := metadata[claudeHandoffDynamicPinMetadataKey].(bool); ok {
+		dynamicPin = value
+	}
 	var lastErr error
 	for attempt := 0; ; attempt++ {
 		// The Claude attempt may have installed a provider-specific round-tripper
@@ -722,6 +821,13 @@ func (m *Manager) compactClaudeHandoffChunk(ctx context.Context, original []byte
 		}
 		if !temporary {
 			return "", fmt.Errorf("context compaction failed permanently: %w", errExecute)
+		}
+		if dynamicPin && strings.TrimSpace(stringMetadataValue(metadata, cliproxyexecutor.PinnedAuthMetadataKey)) != "" {
+			delete(metadata, cliproxyexecutor.PinnedAuthMetadataKey)
+			delete(metadata, claudeHandoffDynamicPinMetadataKey)
+			compactorOpts.Metadata = metadata
+			compactorReq.Metadata = metadata
+			dynamicPin = false
 		}
 		delay := claudeHandoffRetryDelay(errExecute, attempt, maxInterval)
 		timer := time.NewTimer(delay)
