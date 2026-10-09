@@ -172,7 +172,8 @@ routing:
   # opt-in and fail-closed by default so a failed compaction never silently
   # sends the full transcript to another account.
   # The first historical request after a proxy restart and a historical request
-  # after 30 minutes of inactivity are compacted before Claude selection.
+  # after 30 minutes of inactivity are compacted before Claude selection. Nested
+  # model-fallback-router attempts that resolve to Claude use the same hook.
   claude-handoff:
     enabled: false
     compactor-provider: "codex"

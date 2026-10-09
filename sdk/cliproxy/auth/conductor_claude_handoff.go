@@ -20,10 +20,11 @@ import (
 )
 
 const (
-	claudeHandoffInternalMetadataKey = "cliproxy.claude_handoff.internal"
-	claudeHandoffSummaryTag          = "<cli-proxy-claude-handoff>"
-	claudeHandoffSummaryEndTag       = "</cli-proxy-claude-handoff>"
-	claudeHandoffIdleCompactAfter    = 30 * time.Minute
+	claudeHandoffInternalMetadataKey  = "cliproxy.claude_handoff.internal"
+	claudeHandoffCompactedMetadataKey = "cliproxy.claude_handoff.compacted"
+	claudeHandoffSummaryTag           = "<cli-proxy-claude-handoff>"
+	claudeHandoffSummaryEndTag        = "</cli-proxy-claude-handoff>"
+	claudeHandoffIdleCompactAfter     = 30 * time.Minute
 )
 
 type claudeHandoffState struct {
@@ -72,6 +73,24 @@ func claudeHandoffInternal(opts cliproxyexecutor.Options) bool {
 	return value
 }
 
+func claudeHandoffCompactedThisRequest(opts cliproxyexecutor.Options) bool {
+	if opts.Metadata == nil {
+		return false
+	}
+	value, _ := opts.Metadata[claudeHandoffCompactedMetadataKey].(bool)
+	return value
+}
+
+func markClaudeHandoffCompacted(opts cliproxyexecutor.Options) cliproxyexecutor.Options {
+	metadata := cloneSchedulerAnyMap(opts.Metadata)
+	if metadata == nil {
+		metadata = make(map[string]any, 1)
+	}
+	metadata[claudeHandoffCompactedMetadataKey] = true
+	opts.Metadata = metadata
+	return opts
+}
+
 func claudeHandoffSessionID(opts cliproxyexecutor.Options) string {
 	if opts.Metadata == nil {
 		return ""
@@ -85,6 +104,27 @@ func claudeHandoffSessionID(opts cliproxyexecutor.Options) string {
 		return strings.TrimSpace(value)
 	}
 	return ""
+}
+
+// claudeHandoffRouteEligible allows a handoff when the selected execution
+// target is Claude even if a model router entered it from another protocol.
+// Non-Claude sources are eligible only when Claude is the sole route provider;
+// this avoids compacting a request that may still be sent to another provider
+// in a mixed fallback route. The payload must use the shared messages shape so
+// the handoff envelope can be rewritten without changing the source protocol.
+func claudeHandoffRouteEligible(opts cliproxyexecutor.Options, providers []string, payload []byte) bool {
+	if !claudeHandoffMessagesPayload(payload) || !containsProvider(providers, "claude") {
+		return false
+	}
+	if opts.SourceFormat.String() == "claude" {
+		return true
+	}
+	return len(providers) == 1
+}
+
+func claudeHandoffMessagesPayload(payload []byte) bool {
+	messages := gjson.GetBytes(payload, "messages")
+	return messages.IsArray() && len(messages.Array()) > 0
 }
 
 func claudeHandoffSummaryFromState(m *Manager, sessionID string) (claudeHandoffState, bool) {
@@ -184,7 +224,14 @@ func claudeHandoffMessagesHash(messages []gjson.Result) string {
 }
 
 func isClaudeHandoffCandidate(provider string, opts cliproxyexecutor.Options, err error) bool {
-	if !strings.EqualFold(strings.TrimSpace(provider), "claude") || opts.SourceFormat.String() != "claude" || claudeHandoffInternal(opts) || err == nil {
+	if opts.SourceFormat.String() != "claude" {
+		return false
+	}
+	return isClaudeHandoffQuotaCandidate(provider, opts, err)
+}
+
+func isClaudeHandoffQuotaCandidate(provider string, opts cliproxyexecutor.Options, err error) bool {
+	if !strings.EqualFold(strings.TrimSpace(provider), "claude") || claudeHandoffInternal(opts) || err == nil {
 		return false
 	}
 	if statusCodeFromError(err) != http.StatusTooManyRequests {
@@ -283,7 +330,7 @@ func (m *Manager) hasClaudeHandoffCompactorAuth(provider, pinnedID string) bool 
 
 func (m *Manager) applyClaudeHandoffState(req cliproxyexecutor.Request, opts cliproxyexecutor.Options, providers []string) (cliproxyexecutor.Request, cliproxyexecutor.Options) {
 	cfg := claudeHandoffConfig(m.runtimeConfigSnapshot())
-	if !cfg.Enabled || claudeHandoffInternal(opts) || opts.SourceFormat.String() != "claude" || !containsProvider(providers, "claude") {
+	if !cfg.Enabled || claudeHandoffInternal(opts) || !claudeHandoffRouteEligible(opts, providers, req.Payload) {
 		return req, opts
 	}
 	metadata := cloneSchedulerAnyMap(opts.Metadata)
@@ -310,7 +357,7 @@ func (m *Manager) applyClaudeHandoffState(req cliproxyexecutor.Request, opts cli
 // the resulting state prevents repeated compaction on subsequent requests.
 func (m *Manager) maybeCompactClaudeHandoffHistory(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, providers []string) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
 	cfg := claudeHandoffConfig(m.runtimeConfigSnapshot())
-	if m == nil || m.HomeEnabled() || !cfg.Enabled || claudeHandoffInternal(opts) || opts.SourceFormat.String() != "claude" || !containsProvider(providers, "claude") {
+	if m == nil || m.HomeEnabled() || !cfg.Enabled || claudeHandoffInternal(opts) || !claudeHandoffRouteEligible(opts, providers, req.Payload) {
 		return req, opts, nil
 	}
 	messages := gjson.GetBytes(req.Payload, "messages")
@@ -336,7 +383,7 @@ func (m *Manager) maybeCompactClaudeHandoffHistory(ctx context.Context, req clip
 	if len(opts.OriginalRequest) == 0 {
 		opts.OriginalRequest = bytes.Clone(req.Payload)
 	}
-	compacted, errCompact := m.performClaudeHandoff(ctx, req, opts, fmt.Errorf("historical Claude request after proxy restart"))
+	compacted, errCompact := m.performClaudeHandoffFresh(ctx, req, opts, fmt.Errorf("historical Claude request after proxy restart"), idle)
 	if errCompact != nil {
 		if cfg.FailOpen {
 			return req, opts, nil
@@ -345,6 +392,7 @@ func (m *Manager) maybeCompactClaudeHandoffHistory(ctx context.Context, req clip
 	}
 	req.Payload = compacted
 	opts.OriginalRequest = bytes.Clone(compacted)
+	opts = markClaudeHandoffCompacted(opts)
 	return req, opts, nil
 }
 
@@ -476,6 +524,10 @@ func (m *Manager) compactClaudeHandoffContext(ctx context.Context, original []by
 }
 
 func (m *Manager) performClaudeHandoff(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, cause error) ([]byte, error) {
+	return m.performClaudeHandoffFresh(ctx, req, opts, cause, false)
+}
+
+func (m *Manager) performClaudeHandoffFresh(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, cause error, forceRefresh bool) ([]byte, error) {
 	if m == nil {
 		return nil, fmt.Errorf("Claude handoff manager is unavailable")
 	}
@@ -494,6 +546,15 @@ func (m *Manager) performClaudeHandoff(ctx context.Context, req cliproxyexecutor
 	lock.Lock()
 	defer lock.Unlock()
 	if state, ok := claudeHandoffSummaryFromState(m, sessionID); ok {
+		if claudeHandoffCompactedThisRequest(opts) {
+			payload := req.Payload
+			if len(payload) == 0 {
+				payload = opts.OriginalRequest
+			}
+			if len(payload) > 0 && isAlreadyClaudeHandoffCompacted(payload) {
+				return bytes.Clone(payload), nil
+			}
+		}
 		// req.Payload is the current request after any prior handoff rewrite.
 		// opts.OriginalRequest can still be the full inbound Claude transcript;
 		// using it here can send hundreds of thousands of stale tokens to the
@@ -505,7 +566,7 @@ func (m *Manager) performClaudeHandoff(ctx context.Context, req cliproxyexecutor
 		// Once a request already contains a Claude handoff envelope, compact the
 		// current envelope again. This prevents a long-running session from
 		// accumulating an ever-growing post-handoff tail on the next quota.
-		if isAlreadyClaudeHandoffCompacted(payload) {
+		if forceRefresh || isAlreadyClaudeHandoffCompacted(payload) {
 			summary, errCompact := m.compactClaudeHandoffContext(ctx, payload, opts, cfg)
 			if errCompact != nil {
 				return nil, fmt.Errorf("refresh Claude context after %v: %w", cause, errCompact)

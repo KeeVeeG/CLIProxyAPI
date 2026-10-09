@@ -49,7 +49,13 @@ extracted by CLIProxyAPI. After a proxy restart, the first request that already
 contains conversation history is compacted before the first Claude account is
 used. During a running session, a historical request received after at least
 30 minutes of inactivity is compacted again. State is kept for 24 hours. A
-later quota in the same session compacts the current Claude handoff envelope
+later quota in the same session can compact the current Claude handoff envelope
 again, so repeated account rotation does not grow the transcript without bound.
-The mechanism runs in the local conductor path; Home dispatch mode does not
-currently run this hook.
+The request-scoped handoff marker prevents a startup or idle compact from being
+run a second time when that same request immediately receives a Claude quota
+response. Model-fallback-router attempts also pass through this hook: when a
+fallback attempt resolves to Claude, a historical `messages` payload is compacted
+before the Claude request. The hook does not rewrite OpenAI Responses `input`
+payloads because they do not have the Claude Messages shape required for a safe
+handoff envelope. The mechanism runs in the local conductor path; Home dispatch
+mode does not currently run this hook.

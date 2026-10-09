@@ -747,6 +747,125 @@ func TestExecuteStreamClaudeQuotaCompactsOnceAcrossTwoFailures(t *testing.T) {
 	}
 }
 
+func TestExecuteOpenAIRouteToClaudeCompactsOnQuota(t *testing.T) {
+	manager := NewManager(nil, claudeHandoffFlowSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	manager.RegisterExecutor(&claudeHandoffFlowExecutor{})
+	manager.RegisterExecutor(&claudeHandoffFlowCompactorExecutor{})
+	for _, entry := range []struct {
+		id       string
+		provider string
+		model    string
+	}{
+		{id: "claude-a", provider: "claude", model: "claude-opus-5-5"},
+		{id: "claude-b", provider: "claude", model: "claude-opus-5-5"},
+		{id: "codex-a", provider: "codex", model: "gpt-6.1-sol"},
+	} {
+		registry.GetGlobalRegistry().RegisterClient(entry.id, entry.provider, []*registry.ModelInfo{{ID: entry.model}})
+		entryID := entry.id
+		t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(entryID) })
+		attributes := map[string]string{}
+		if entry.provider == "claude" {
+			attributes["auth_kind"] = "oauth"
+		}
+		if _, err := manager.Register(context.Background(), &Auth{ID: entry.id, Provider: entry.provider, Status: StatusActive, Attributes: attributes, Metadata: map[string]any{"disable_cooling": true}}); err != nil {
+			t.Fatalf("Register(%s) error = %v", entry.id, err)
+		}
+	}
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
+		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6.1-sol", KeepRecentMessages: 2,
+	}}})
+	payload := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"work"}]}`)
+	resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI, OriginalRequest: payload,
+		Metadata: map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: "openai-to-claude-session"},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if string(resp.Payload) != `{"ok":true}` {
+		t.Fatalf("response = %s", resp.Payload)
+	}
+}
+
+// A model-fallback plugin can enter the auth manager with a non-Claude source
+// format while its selected fallback model resolves to the Claude provider.
+// A historical transcript must be compacted before the first Claude attempt,
+// and that single envelope must be reused after further Claude quota failures.
+func TestExecuteOpenAIRouteToClaudeCompactsHistoricalPayloadOnce(t *testing.T) {
+	manager := NewManager(nil, claudeHandoffFlowSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	compactor := &claudeHandoffPayloadRecordingCompactorExecutor{}
+	executor := registerThreeClaudeHandoffAccounts(t, manager, compactor)
+	manager.SetConfig(claudeHandoffThreeAccountConfig())
+	payload := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"old request"},{"role":"assistant","content":"old answer"},{"role":"user","content":"latest request"}]}`)
+	resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI, OriginalRequest: payload,
+		Metadata: map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: "openai-to-claude-history-session"},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if string(resp.Payload) != `{"ok":true}` {
+		t.Fatalf("response = %s", resp.Payload)
+	}
+	if got := compactor.calls.Load(); got != 1 {
+		t.Fatalf("compactor calls = %d, want exactly one", got)
+	}
+	for _, authID := range []string{"claude-a", "claude-b", "claude-c"} {
+		if !isAlreadyClaudeHandoffCompacted(executor.nonStreamPayloads[authID]) {
+			t.Fatalf("%s did not receive the compacted Claude envelope", authID)
+		}
+	}
+}
+
+func TestExecuteStreamOpenAIRouteToClaudeCompactsHistoricalPayloadOnce(t *testing.T) {
+	manager := NewManager(nil, claudeHandoffFlowSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	compactor := &claudeHandoffPayloadRecordingCompactorExecutor{}
+	executor := registerThreeClaudeHandoffAccounts(t, manager, compactor)
+	manager.SetConfig(claudeHandoffThreeAccountConfig())
+	payload := []byte(`{"model":"claude-opus-5-5","stream":true,"messages":[{"role":"user","content":"old request"},{"role":"assistant","content":"old answer"},{"role":"user","content":"latest request"}]}`)
+	stream, err := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI, OriginalRequest: payload, Stream: true,
+		Metadata: map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: "openai-to-claude-history-stream-session"},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteStream() error = %v", err)
+	}
+	var received []byte
+	for chunk := range stream.Chunks {
+		if chunk.Err != nil {
+			t.Fatalf("stream chunk error = %v", chunk.Err)
+		}
+		received = append(received, chunk.Payload...)
+	}
+	if string(received) != `{"ok":true}` {
+		t.Fatalf("stream response = %s", received)
+	}
+	if got := compactor.calls.Load(); got != 1 {
+		t.Fatalf("compactor calls = %d, want exactly one", got)
+	}
+	for _, authID := range []string{"claude-a", "claude-b", "claude-c"} {
+		if !isAlreadyClaudeHandoffCompacted(executor.streamPayloads[authID]) {
+			t.Fatalf("%s did not receive the compacted Claude stream envelope", authID)
+		}
+	}
+}
+
+func TestClaudeHandoffRouteEligibilityRequiresMessagesPayloadForNonClaudeSource(t *testing.T) {
+	providers := []string{"claude"}
+	if !claudeHandoffRouteEligible(cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}, providers, []byte(`{"messages":[{"role":"user","content":"x"}]}`)) {
+		t.Fatal("OpenAI chat payload should be eligible for a Claude-only route")
+	}
+	if claudeHandoffRouteEligible(cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAIResponse}, providers, []byte(`{"input":[{"role":"user","content":"x"}]}`)) {
+		t.Fatal("OpenAI Responses payload without messages must not enter Claude handoff")
+	}
+	if claudeHandoffRouteEligible(cliproxyexecutor.Options{SourceFormat: sdktranslator.FormatOpenAI}, []string{"claude", "codex"}, []byte(`{"messages":[{"role":"user","content":"x"}]}`)) {
+		t.Fatal("mixed routes must defer non-Claude-source handoff until Claude is selected")
+	}
+}
+
 func TestMaybeCompactClaudeHandoffHistoryOnFirstRequest(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.RegisterExecutor(&claudeHandoffFlowCompactorExecutor{})
@@ -778,7 +897,8 @@ func TestMaybeCompactClaudeHandoffHistoryOnFirstRequest(t *testing.T) {
 
 func TestMaybeCompactClaudeHandoffHistoryAfterThirtyMinutesIdle(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
-	manager.RegisterExecutor(&claudeHandoffFlowCompactorExecutor{})
+	compactor := &claudeHandoffPayloadRecordingCompactorExecutor{}
+	manager.RegisterExecutor(compactor)
 	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
 		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6.1-sol", KeepRecentMessages: 2,
 	}}})
@@ -804,9 +924,12 @@ func TestMaybeCompactClaudeHandoffHistoryAfterThirtyMinutesIdle(t *testing.T) {
 	if !isAlreadyClaudeHandoffCompacted(req.Payload) {
 		t.Fatalf("idle Claude session was not compacted: %s", req.Payload)
 	}
+	if got := compactor.calls.Load(); got != 1 {
+		t.Fatalf("idle compactor calls = %d, want exactly one fresh compact", got)
+	}
 }
 
-func TestExecuteStreamClaudeQuotaCompactsBootstrapErrorBeforeNextOAuthAccount(t *testing.T) {
+func TestExecuteStreamOpenAIRouteToClaudeCompactsBootstrapErrorBeforeNextOAuthAccount(t *testing.T) {
 	manager := NewManager(nil, claudeHandoffFlowSelector{}, nil)
 	manager.SetRetryConfig(0, 0, 0)
 	manager.RegisterExecutor(&claudeHandoffFlowExecutor{})
@@ -836,7 +959,7 @@ func TestExecuteStreamClaudeQuotaCompactsBootstrapErrorBeforeNextOAuthAccount(t 
 	}
 	payload := []byte(`{"model":"claude-opus-5-5","stream":true,"messages":[{"role":"user","content":"work on this"}]}`)
 	stream, err := manager.ExecuteStream(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
-		SourceFormat:    sdktranslator.FormatClaude,
+		SourceFormat:    sdktranslator.FormatOpenAI,
 		OriginalRequest: payload,
 		Stream:          true,
 		Metadata: map[string]any{
