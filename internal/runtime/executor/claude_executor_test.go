@@ -3452,6 +3452,9 @@ func TestEnforceClaudeHandoffWirePayloadBudgetChecksFinalBody(t *testing.T) {
 	if err := enforceClaudeHandoffWirePayloadBudget(cfg, []byte(`{"messages":[{"role":"user","content":[{"type":"text","text":"documentation mentions <cli-proxy-claude-handoff>"}]}]}`)); err != nil {
 		t.Fatalf("literal array text marker triggered wire budget: %v", err)
 	}
+	if err := enforceClaudeHandoffWirePayloadBudget(cfg, []byte(`{"messages":[{"role":"user","content":"<cli-proxy-claude-handoff>summary</cli-proxy-claude-handoff>"}]}`)); err == nil {
+		t.Fatal("oversized synthetic string envelope bypassed wire budget")
+	}
 }
 
 func TestClaudeExecutor_ExecuteSanitizesSignaturesBeforeUpstream(t *testing.T) {
