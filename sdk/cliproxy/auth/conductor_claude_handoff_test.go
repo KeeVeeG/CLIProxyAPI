@@ -379,17 +379,35 @@ func TestRewriteClaudeHandoffPayloadPreservesEnvelopeAndDoesNotMutateInput(t *te
 		}
 	}
 	messages := gjson.GetBytes(rewritten, "messages").Array()
-	if len(messages) != 3 {
-		t.Fatalf("rewritten messages = %d, want summary pair plus one recent message", len(messages))
+	if len(messages) != 2 {
+		t.Fatalf("rewritten messages = %d, want summary plus one recent message", len(messages))
 	}
 	if !strings.Contains(messages[0].Get("content.0.text").String(), claudeHandoffSummaryTag) || !strings.Contains(messages[0].Get("content.0.text").String(), "run tests") {
 		t.Fatalf("summary marker/content missing from first message: %s", messages[0].Raw)
 	}
-	if messages[1].Get("role").String() != "assistant" {
-		t.Fatalf("summary acknowledgement role = %q, want assistant", messages[1].Get("role").String())
+	if messages[len(messages)-1].Get("role").String() != "user" {
+		t.Fatalf("rewritten request ended with role %q, want user", messages[len(messages)-1].Get("role").String())
 	}
-	if messages[2].Get("content.0.text").String() != "latest" {
-		t.Fatalf("recent tail message was not retained: %s", messages[2].Raw)
+	if messages[1].Get("content.0.text").String() != "latest" {
+		t.Fatalf("recent tail message was not retained: %s", messages[1].Raw)
+	}
+}
+
+func TestRewriteClaudeHandoffPayloadAppendsUserAfterAssistantTail(t *testing.T) {
+	payload := []byte(`{"messages":[{"role":"user","content":"old"}]}`)
+	rewritten, err := rewriteClaudeHandoffPayloadWithTail(payload, `{"goal":"continue"}`, []string{`{"role":"assistant","content":"latest answer"}`})
+	if err != nil {
+		t.Fatalf("rewriteClaudeHandoffPayload() error = %v", err)
+	}
+	messages := gjson.GetBytes(rewritten, "messages").Array()
+	if len(messages) != 3 {
+		t.Fatalf("rewritten messages = %d, want summary, assistant tail, continuation user", len(messages))
+	}
+	if messages[0].Get("role").String() != "user" || messages[1].Get("role").String() != "assistant" || messages[2].Get("role").String() != "user" {
+		t.Fatalf("rewritten roles = %q,%q,%q, want user,assistant,user", messages[0].Get("role").String(), messages[1].Get("role").String(), messages[2].Get("role").String())
+	}
+	if !strings.Contains(messages[2].Get("content.0.text").String(), "Continue from the Claude handoff context") {
+		t.Fatalf("continuation user message missing: %s", messages[2].Raw)
 	}
 }
 
@@ -487,14 +505,17 @@ func TestApplyClaudeHandoffStateKeepsTurnsAddedAfterBoundary(t *testing.T) {
 ]}`)
 	req, _ := manager.applyClaudeHandoffState(cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: nextPayload}, claudeHandoffOptions(), []string{"claude"})
 	messages := gjson.GetBytes(req.Payload, "messages").Array()
-	if len(messages) != 5 {
-		t.Fatalf("rewritten message count = %d, want summary pair + boundary and 2 post-boundary turns", len(messages))
+	if len(messages) != 4 {
+		t.Fatalf("rewritten message count = %d, want summary + boundary and 2 post-boundary turns", len(messages))
 	}
 	text := string(req.Payload)
 	for _, want := range []string{"boundary", "post-boundary answer", "new request"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("post-boundary turn %q was dropped: %s", want, text)
 		}
+	}
+	if messages[len(messages)-1].Get("role").String() != "user" {
+		t.Fatalf("rewritten message tail role = %q, want user", messages[len(messages)-1].Get("role").String())
 	}
 	if strings.Contains(text, `"before"`) || strings.Contains(text, `"answer"`) {
 		t.Fatalf("pre-boundary transcript was replayed after summary: %s", text)

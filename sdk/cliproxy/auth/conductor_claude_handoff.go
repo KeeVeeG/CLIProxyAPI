@@ -29,7 +29,7 @@ const (
 	// and a context-too-large response halves the limit for that chunk and
 	// retries it, so a dense chunk remains safe.
 	claudeHandoffCompactorChunkBytes  = 768 * 1024
-	claudeHandoffCompactorParallelism = 5
+	claudeHandoffCompactorParallelism = 7
 	claudeHandoffSummaryTag           = "<cli-proxy-claude-handoff>"
 	claudeHandoffSummaryEndTag        = "</cli-proxy-claude-handoff>"
 	claudeHandoffIdleCompactAfter     = 30 * time.Minute
@@ -681,6 +681,9 @@ func (m *Manager) compactClaudeHandoffContextWithLimit(ctx context.Context, orig
 	}
 	batchOpts := opts
 	metadata := cloneSchedulerAnyMap(opts.Metadata)
+	if metadata == nil {
+		metadata = make(map[string]any, 2)
+	}
 	// These callbacks usually close over the outer request's attempted-auth
 	// map. Never invoke them concurrently from compactor workers.
 	delete(metadata, cliproxyexecutor.SelectedAuthCallbackMetadataKey)
@@ -954,16 +957,22 @@ func rewriteClaudeHandoffPayloadWithTail(payload []byte, summary string, tail []
 			"text": claudeHandoffSummaryTag + "\n" + summary + "\n" + claudeHandoffSummaryEndTag,
 		}},
 	})
-	claudeHandoffAssistant, _ := json.Marshal(map[string]any{
-		"role": "assistant",
-		"content": []map[string]any{{
-			"type": "text",
-			"text": "I will continue from the Claude handoff context.",
-		}},
-	})
 	items := make([]string, 0, len(tail)+2)
-	items = append(items, string(claudeHandoffUser), string(claudeHandoffAssistant))
+	items = append(items, string(claudeHandoffUser))
 	items = append(items, tail...)
+	// Claude Messages requests must end with a user turn. A state-boundary tail
+	// can legitimately end on an assistant/tool turn, so add a neutral user
+	// continuation prompt instead of relying on an assistant prefill.
+	if len(items) == 1 || gjson.Get(items[len(items)-1], "role").String() != "user" {
+		continuation, _ := json.Marshal(map[string]any{
+			"role": "user",
+			"content": []map[string]any{{
+				"type": "text",
+				"text": "Continue from the Claude handoff context and address the current request.",
+			}},
+		})
+		items = append(items, string(continuation))
+	}
 	updated, errSet := sjson.SetRawBytes(payload, "messages", []byte("["+strings.Join(items, ",")+"]"))
 	if errSet != nil {
 		return nil, errSet
