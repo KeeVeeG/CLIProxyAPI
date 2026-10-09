@@ -119,6 +119,42 @@ func TestClaudeHandoffCompactorRotatesPastContextTooLargeAccount(t *testing.T) {
 	}
 }
 
+func TestClaudeHandoffCompactorSplitsLargeTranscript(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	recorder := &claudeHandoffPayloadRecordingCompactorExecutor{}
+	manager.RegisterExecutor(recorder)
+	const model = "gpt-6.1-sol"
+	const authID = "claude-handoff-chunk-compactor-auth"
+	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+	if _, err := manager.Register(context.Background(), &Auth{ID: authID, Provider: "codex", Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
+		Enabled: true, CompactorProvider: "codex", CompactorModel: model,
+	}}})
+	messages := make([]map[string]any, 0, 5)
+	for index := 0; index < 5; index++ {
+		messages = append(messages, map[string]any{"role": "user", "content": strings.Repeat(fmt.Sprintf("chunk-%d ", index), 30000)})
+	}
+	payload, err := json.Marshal(map[string]any{"messages": messages})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	summary, err := manager.compactClaudeHandoffContext(ctx, payload, claudeHandoffOptions(), claudeHandoffConfig(manager.runtimeConfigSnapshot()))
+	if err != nil {
+		t.Fatalf("compactClaudeHandoffContext() error = %v", err)
+	}
+	if summary == "" {
+		t.Fatal("compactor summary is empty")
+	}
+	if got := recorder.calls.Load(); got < 2 {
+		t.Fatalf("compactor calls = %d, want at least two chunks", got)
+	}
+}
+
 func TestIsClaudeHandoffCandidateRequiresExactQuotaSignal(t *testing.T) {
 	const quotaMessage = "This request would exceed your account's rate limit. Please try again later."
 	tests := []struct {
