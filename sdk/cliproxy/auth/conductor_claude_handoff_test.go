@@ -451,7 +451,8 @@ func (e *claudeHandoffFlowCompactorExecutor) Execute(_ context.Context, _ *Auth,
 }
 
 type claudeHandoffPayloadRecordingCompactorExecutor struct {
-	payload []byte
+	payload  []byte
+	metadata map[string]any
 }
 
 func (e *claudeHandoffPayloadRecordingCompactorExecutor) Identifier() string { return "codex" }
@@ -467,8 +468,9 @@ func (*claudeHandoffPayloadRecordingCompactorExecutor) ExecuteStream(context.Con
 func (*claudeHandoffPayloadRecordingCompactorExecutor) HttpRequest(context.Context, *Auth, *http.Request) (*http.Response, error) {
 	return nil, &Error{HTTPStatus: http.StatusNotImplemented, Message: "not used"}
 }
-func (e *claudeHandoffPayloadRecordingCompactorExecutor) Execute(_ context.Context, _ *Auth, req cliproxyexecutor.Request, _ cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
+func (e *claudeHandoffPayloadRecordingCompactorExecutor) Execute(_ context.Context, _ *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (cliproxyexecutor.Response, error) {
 	e.payload = append(e.payload[:0], req.Payload...)
+	e.metadata = opts.Metadata
 	return cliproxyexecutor.Response{Payload: []byte(`{"output":[{"content":[{"text":"{\"goal\":\"continue\"}"}]}]}`)}, nil
 }
 
@@ -501,6 +503,15 @@ func TestPerformClaudeHandoffCompactsCurrentPayloadInsteadOfOriginalRequest(t *t
 	}
 	if strings.Contains(compactorText, "oversized-") || len(recorder.payload) >= len(oversizedOriginal) {
 		t.Fatalf("compactor received oversized OriginalRequest: payload bytes=%d original bytes=%d", len(recorder.payload), len(oversizedOriginal))
+	}
+	if got := recorder.metadata[cliproxyexecutor.RequestedModelMetadataKey]; got != "gpt-6.1-sol" {
+		t.Fatalf("compactor requested model metadata = %#v, want gpt-6.1-sol", got)
+	}
+	if got := recorder.metadata[cliproxyexecutor.AuthSelectionModelMetadataKey]; got != "gpt-6.1-sol" {
+		t.Fatalf("compactor auth selection metadata = %#v, want gpt-6.1-sol", got)
+	}
+	if got := recorder.metadata[claudeHandoffInternalMetadataKey]; got != true {
+		t.Fatalf("compactor internal metadata = %#v, want true", got)
 	}
 }
 

@@ -412,6 +412,11 @@ func (m *Manager) compactClaudeHandoffContext(ctx context.Context, original []by
 		metadata = make(map[string]any, 1)
 	}
 	metadata[claudeHandoffInternalMetadataKey] = true
+	// The inbound request may carry the original Claude alias in scheduler
+	// metadata. Keep the internal compactor pinned to its configured model so
+	// model-fallback plugins do not reinterpret the compactor as a Claude call.
+	metadata[cliproxyexecutor.RequestedModelMetadataKey] = cfg.CompactorModel
+	metadata[cliproxyexecutor.AuthSelectionModelMetadataKey] = cfg.CompactorModel
 	compactorOpts := cliproxyexecutor.Options{
 		SourceFormat:    sdktranslator.FormatOpenAIResponse,
 		ResponseFormat:  sdktranslator.FormatOpenAIResponse,
