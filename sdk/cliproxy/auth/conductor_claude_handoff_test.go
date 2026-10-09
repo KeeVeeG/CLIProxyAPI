@@ -1092,6 +1092,35 @@ func TestExecuteStreamClaudeQuotaCompactsOnceAcrossTwoFailures(t *testing.T) {
 	}
 }
 
+func TestExecuteClaudeQuotaDoesNotRecompactEnvelopeWhenMarkerMetadataIsLost(t *testing.T) {
+	manager := NewManager(nil, claudeHandoffFlowSelector{}, nil)
+	manager.SetRetryConfig(0, 0, 0)
+	compactor := &claudeHandoffPayloadRecordingCompactorExecutor{}
+	executor := registerThreeClaudeHandoffAccounts(t, manager, compactor)
+	manager.SetConfig(claudeHandoffThreeAccountConfig())
+	// Simulate a plugin boundary that preserves the rewritten payload but drops
+	// the request-scoped compacted metadata marker.
+	payload := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":[{"type":"text","text":"<cli-proxy-claude-handoff>\n{\"goal\":\"continue\"}\n</cli-proxy-claude-handoff>"}]}]}`)
+	resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload,
+		Metadata: map[string]any{cliproxyexecutor.CanonicalSessionIDMetadataKey: "claude-envelope-marker-loss"},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if string(resp.Payload) != `{"ok":true}` {
+		t.Fatalf("response = %s", resp.Payload)
+	}
+	if got := compactor.calls.Load(); got != 0 {
+		t.Fatalf("compactor calls = %d, want zero for an already compacted envelope", got)
+	}
+	for _, authID := range []string{"claude-a", "claude-b", "claude-c"} {
+		if !isAlreadyClaudeHandoffCompacted(executor.nonStreamPayloads[authID]) {
+			t.Fatalf("%s did not receive the existing compacted envelope", authID)
+		}
+	}
+}
+
 func TestExecuteOpenAIRouteToClaudeCompactsOnQuota(t *testing.T) {
 	manager := NewManager(nil, claudeHandoffFlowSelector{}, nil)
 	manager.SetRetryConfig(0, 0, 0)

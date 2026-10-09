@@ -534,7 +534,11 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	attempted := make(map[string]struct{})
 	var lastErr error
 	var upstreamErr error
-	claudeHandoffAttempted := claudeHandoffCompactedThisRequest(opts)
+	// A handler/plugin boundary may preserve the compacted payload while
+	// dropping request-scoped metadata. Treat the envelope itself as proof that
+	// this logical request has already been compacted so a Claude 429 cannot
+	// trigger a second full Luna compact.
+	claudeHandoffAttempted := claudeHandoffCompactedThisRequest(opts) || isAlreadyClaudeHandoffCompacted(req.Payload)
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
@@ -1009,7 +1013,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	var lastErr error
 	var upstreamErr error
 	var roundTiming homeRetryRoundTiming
-	claudeHandoffAttempted := claudeHandoffCompactedThisRequest(opts)
+	// The compact marker can be lost when a plugin executor reconstructs
+	// Options, while the rewritten payload survives. The envelope must suppress
+	// another compaction on the next Claude credential.
+	claudeHandoffAttempted := claudeHandoffCompactedThisRequest(opts) || isAlreadyClaudeHandoffCompacted(req.Payload)
 	for {
 		allowSameAuthRetry := homeMode && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !allowSameAuthRetry {
