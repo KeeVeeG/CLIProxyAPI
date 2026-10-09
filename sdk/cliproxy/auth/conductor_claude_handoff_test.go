@@ -98,7 +98,7 @@ func TestSplitClaudeHandoffPayloadEscapedGiantMessageStaysBelowLimit(t *testing.
 		"model": "claude-opus-5-5",
 		"messages": []map[string]any{{
 			"role":    "user",
-			"content": strings.Repeat(`quote " slash \\ tool_result `, 12000),
+			"content": strings.Repeat(`quote " slash \\ tool_result Ж `, 12000),
 		}, {
 			"role":    "user",
 			"content": "latest request",
@@ -118,6 +118,36 @@ func TestSplitClaudeHandoffPayloadEscapedGiantMessageStaysBelowLimit(t *testing.
 		if len(chunk) > 32*1024 {
 			t.Fatalf("chunk %d has %d bytes, want <= %d", index, len(chunk), 32*1024)
 		}
+		if strings.Contains(string(chunk), "\uFFFD") {
+			t.Fatalf("chunk %d contains a replacement character after UTF-8 splitting", index)
+		}
+	}
+}
+
+func TestClaudeHandoffCompactorPayloadDropsRequestToolSchemas(t *testing.T) {
+	payload, err := json.Marshal(map[string]any{
+		"model": "claude-opus-5-5",
+		"system": []map[string]any{{"type": "text", "text": "keep system context"}},
+		"tools": []map[string]any{{"name": "large_tool", "description": strings.Repeat("schema ", 1000)}},
+		"tool_choice": map[string]any{"type": "auto"},
+		"parallel_tool_calls": true,
+		"messages": []map[string]any{{"role": "user", "content": "keep conversation"}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	compactorPayload, err := claudeHandoffCompactorPayload(payload)
+	if err != nil {
+		t.Fatalf("claudeHandoffCompactorPayload() error = %v", err)
+	}
+	if gjson.GetBytes(compactorPayload, "tools").Exists() || gjson.GetBytes(compactorPayload, "tool_choice").Exists() || gjson.GetBytes(compactorPayload, "parallel_tool_calls").Exists() {
+		t.Fatalf("request-only tool fields remain in compactor payload: %s", compactorPayload)
+	}
+	if !gjson.GetBytes(compactorPayload, "system").Exists() || !gjson.GetBytes(compactorPayload, "messages").IsArray() {
+		t.Fatalf("compactor payload dropped conversation fields: %s", compactorPayload)
+	}
+	if gjson.GetBytes(payload, "tools").IsArray() == false {
+		t.Fatalf("test payload unexpectedly lost original tools: %s", payload)
 	}
 }
 

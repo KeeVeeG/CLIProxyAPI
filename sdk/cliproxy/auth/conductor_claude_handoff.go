@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
@@ -462,6 +463,25 @@ func claudeHandoffPayloadWithMessages(payload []byte, messages []json.RawMessage
 	return sjson.SetRawBytes(payload, "messages", base)
 }
 
+// claudeHandoffCompactorPayload removes request-only tool schemas before a
+// transcript is split for the internal compactor. Tool definitions are useful
+// to Claude while executing the request, but they do not add conversation
+// facts for summarization and can be repeated in every chunk. The original
+// payload is kept intact for the final Claude rewrite.
+func claudeHandoffCompactorPayload(payload []byte) ([]byte, error) {
+	compactorPayload, err := sjson.DeleteBytes(payload, "tools")
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range []string{"tool_choice", "parallel_tool_calls"} {
+		compactorPayload, err = sjson.DeleteBytes(compactorPayload, path)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return compactorPayload, nil
+}
+
 // splitClaudeHandoffPayload keeps complete messages together so tool-use and
 // tool-result pairs remain understandable to the compactor. A single enormous
 // message is represented by user-text fragments as a last resort; dropping a
@@ -537,6 +557,18 @@ func splitClaudeHandoffPayload(payload []byte, maxBytes int) ([][]byte, error) {
 			if end > len(raw) {
 				end = len(raw)
 			}
+			// Raw JSON is valid UTF-8, but a byte budget can land in the
+			// middle of a multi-byte character. Keep synthetic fragments valid
+			// UTF-8 so json.Marshal does not replace data with U+FFFD.
+			for end > start && end < len(raw) && !utf8.ValidString(raw[start:end]) {
+				end--
+			}
+			if end == start {
+				end = start + fragmentBytes
+				if end > len(raw) {
+					end = len(raw)
+				}
+			}
 			for {
 				fragment, _ := json.Marshal(map[string]any{
 					"role":    "user",
@@ -600,7 +632,11 @@ func (m *Manager) compactClaudeHandoffContext(ctx context.Context, original []by
 }
 
 func (m *Manager) compactClaudeHandoffContextWithLimit(ctx context.Context, original []byte, opts cliproxyexecutor.Options, cfg internalconfig.ClaudeHandoffConfig, maxBytes, depth int) (string, error) {
-	chunks, err := splitClaudeHandoffPayload(original, maxBytes)
+	compactorPayload, err := claudeHandoffCompactorPayload(original)
+	if err != nil {
+		return "", err
+	}
+	chunks, err := splitClaudeHandoffPayload(compactorPayload, maxBytes)
 	if err != nil {
 		return "", err
 	}
