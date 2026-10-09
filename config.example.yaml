@@ -180,7 +180,7 @@ routing:
   claude-handoff:
     enabled: false
     compactor-provider: "codex"
-    compactor-model: "gpt-6.1-sol"
+    compactor-model: "gpt-6-luna"
     # Optional stable OAuth credential ID for the OpenAI compactor.
     # compactor-auth-id: ""
     compactor-max-output-tokens: 8192

@@ -214,7 +214,7 @@ func TestClaudeHandoffCompactorRotatesPastContextTooLargeAccount(t *testing.T) {
 	executor := &claudeHandoffContextRotationExecutor{}
 	manager.RegisterExecutor(executor)
 	manager.SetRetryConfig(0, 1, 0)
-	const model = "gpt-6.1-sol"
+	const model = "gpt-6-luna"
 	for _, id := range []string{"codex-a", "codex-b"} {
 		registry.GetGlobalRegistry().RegisterClient(id, "codex", []*registry.ModelInfo{{ID: model}})
 		entryID := id
@@ -244,7 +244,7 @@ func TestClaudeHandoffCompactorSplitsLargeTranscript(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	recorder := &claudeHandoffPayloadRecordingCompactorExecutor{}
 	manager.RegisterExecutor(recorder)
-	const model = "gpt-6.1-sol"
+	const model = "gpt-6-luna"
 	const authID = "claude-handoff-chunk-compactor-auth"
 	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
@@ -345,12 +345,12 @@ func TestIsClaudeHandoffCandidateReadsStreamBootstrapQuotaError(t *testing.T) {
 
 func TestBuildCompactorPayloadUsesXHighAndPreservesTranscript(t *testing.T) {
 	original := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"keep this fact"}]}`)
-	payload, err := buildClaudeHandoffCompactorPayload(original, "gpt-6.1-sol", 4096)
+	payload, err := buildClaudeHandoffCompactorPayload(original, "gpt-6-luna", 4096)
 	if err != nil {
 		t.Fatalf("buildClaudeHandoffCompactorPayload() error = %v", err)
 	}
-	if got := gjson.GetBytes(payload, "model").String(); got != "gpt-6.1-sol" {
-		t.Fatalf("model = %q, want gpt-6.1-sol", got)
+	if got := gjson.GetBytes(payload, "model").String(); got != "gpt-6-luna" {
+		t.Fatalf("model = %q, want gpt-6-luna", got)
 	}
 	if got := gjson.GetBytes(payload, "reasoning.effort").String(); got != "xhigh" {
 		t.Fatalf("reasoning.effort = %q, want xhigh", got)
@@ -546,7 +546,7 @@ func TestClaudeHandoffConfigDefaultsDoNotMutateInput(t *testing.T) {
 	if !reflect.DeepEqual(before, cfg.Routing.ClaudeHandoff) {
 		t.Fatal("claudeHandoffConfig mutated the runtime configuration")
 	}
-	if got.CompactorProvider != "codex" || got.CompactorModel != "gpt-6.1-sol" || got.CompactorMaxOutputTokens != 8192 || got.KeepRecentMessages != 8 || got.MaxSummaryBytes <= 0 {
+	if got.CompactorProvider != "codex" || got.CompactorModel != "gpt-6-luna" || got.CompactorMaxOutputTokens != 8192 || got.KeepRecentMessages != 8 || got.MaxSummaryBytes <= 0 {
 		t.Fatalf("claudeHandoffConfig defaults = %+v", got)
 	}
 }
@@ -604,7 +604,7 @@ func TestCompactClaudeContextRetriesTemporaryCompactorFailure(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	executor := &claudeHandoffRetryExecutor{}
 	manager.RegisterExecutor(executor)
-	model := "gpt-6.1-sol"
+	model := "gpt-6-luna"
 	authID := "claude-handoff-compactor-auth"
 	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
@@ -723,10 +723,10 @@ func TestPerformClaudeHandoffCompactsCurrentPayloadInsteadOfOriginalRequest(t *t
 	recorder := &claudeHandoffPayloadRecordingCompactorExecutor{}
 	manager.RegisterExecutor(recorder)
 	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
-		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6.1-sol",
+		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6-luna",
 	}}})
 	const authID = "claude-handoff-current-payload-compactor-auth"
-	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "gpt-6.1-sol"}})
+	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "gpt-6-luna"}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
 	if _, err := manager.Register(context.Background(), &Auth{ID: authID, Provider: "codex", Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}); err != nil {
 		t.Fatalf("Register() error = %v", err)
@@ -750,11 +750,11 @@ func TestPerformClaudeHandoffCompactsCurrentPayloadInsteadOfOriginalRequest(t *t
 	if strings.Contains(compactorText, "oversized-") || len(recorder.payload) >= len(oversizedOriginal) {
 		t.Fatalf("compactor received oversized OriginalRequest: payload bytes=%d original bytes=%d", len(recorder.payload), len(oversizedOriginal))
 	}
-	if got := recorder.metadata[cliproxyexecutor.RequestedModelMetadataKey]; got != "gpt-6.1-sol" {
-		t.Fatalf("compactor requested model metadata = %#v, want gpt-6.1-sol", got)
+	if got := recorder.metadata[cliproxyexecutor.RequestedModelMetadataKey]; got != "gpt-6-luna" {
+		t.Fatalf("compactor requested model metadata = %#v, want gpt-6-luna", got)
 	}
-	if got := recorder.metadata[cliproxyexecutor.AuthSelectionModelMetadataKey]; got != "gpt-6.1-sol" {
-		t.Fatalf("compactor auth selection metadata = %#v, want gpt-6.1-sol", got)
+	if got := recorder.metadata[cliproxyexecutor.AuthSelectionModelMetadataKey]; got != "gpt-6-luna" {
+		t.Fatalf("compactor auth selection metadata = %#v, want gpt-6-luna", got)
 	}
 	if got := recorder.metadata[claudeHandoffInternalMetadataKey]; got != true {
 		t.Fatalf("compactor internal metadata = %#v, want true", got)
@@ -782,7 +782,7 @@ func TestExecuteClaudeQuotaCompactsBeforeSelectingNextOAuthAccount(t *testing.T)
 	manager.RegisterExecutor(&claudeHandoffFlowExecutor{})
 	manager.RegisterExecutor(&claudeHandoffFlowCompactorExecutor{})
 	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
-		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6.1-sol", KeepRecentMessages: 2,
+		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6-luna", KeepRecentMessages: 2,
 	}}})
 	for _, entry := range []struct {
 		id       string
@@ -791,7 +791,7 @@ func TestExecuteClaudeQuotaCompactsBeforeSelectingNextOAuthAccount(t *testing.T)
 	}{
 		{id: "claude-a", provider: "claude", model: "claude-opus-5-5"},
 		{id: "claude-b", provider: "claude", model: "claude-opus-5-5"},
-		{id: "codex-a", provider: "codex", model: "gpt-6.1-sol"},
+		{id: "codex-a", provider: "codex", model: "gpt-6-luna"},
 	} {
 		registry.GetGlobalRegistry().RegisterClient(entry.id, entry.provider, []*registry.ModelInfo{{ID: entry.model}})
 		entryID := entry.id
@@ -887,7 +887,7 @@ func registerThreeClaudeHandoffAccounts(t *testing.T, manager *Manager, compacto
 		{id: "claude-a", provider: "claude", model: "claude-opus-5-5"},
 		{id: "claude-b", provider: "claude", model: "claude-opus-5-5"},
 		{id: "claude-c", provider: "claude", model: "claude-opus-5-5"},
-		{id: "codex-a", provider: "codex", model: "gpt-6.1-sol"},
+		{id: "codex-a", provider: "codex", model: "gpt-6-luna"},
 	} {
 		registry.GetGlobalRegistry().RegisterClient(entry.id, entry.provider, []*registry.ModelInfo{{ID: entry.model}})
 		entryID := entry.id
@@ -905,7 +905,7 @@ func registerThreeClaudeHandoffAccounts(t *testing.T, manager *Manager, compacto
 
 func claudeHandoffThreeAccountConfig() *internalconfig.Config {
 	return &internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
-		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6.1-sol", KeepRecentMessages: 2,
+		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6-luna", KeepRecentMessages: 2,
 	}}}
 }
 
@@ -947,7 +947,7 @@ func TestExecuteStreamClaudeQuotaCompactsOnceAcrossTwoFailures(t *testing.T) {
 		{id: "claude-a", provider: "claude", model: "claude-opus-5-5"},
 		{id: "claude-b", provider: "claude", model: "claude-opus-5-5"},
 		{id: "claude-c", provider: "claude", model: "claude-opus-5-5"},
-		{id: "codex-a", provider: "codex", model: "gpt-6.1-sol"},
+		{id: "codex-a", provider: "codex", model: "gpt-6-luna"},
 	} {
 		registry.GetGlobalRegistry().RegisterClient(entry.id, entry.provider, []*registry.ModelInfo{{ID: entry.model}})
 		entryID := entry.id
@@ -1001,7 +1001,7 @@ func TestExecuteOpenAIRouteToClaudeCompactsOnQuota(t *testing.T) {
 	}{
 		{id: "claude-a", provider: "claude", model: "claude-opus-5-5"},
 		{id: "claude-b", provider: "claude", model: "claude-opus-5-5"},
-		{id: "codex-a", provider: "codex", model: "gpt-6.1-sol"},
+		{id: "codex-a", provider: "codex", model: "gpt-6-luna"},
 	} {
 		registry.GetGlobalRegistry().RegisterClient(entry.id, entry.provider, []*registry.ModelInfo{{ID: entry.model}})
 		entryID := entry.id
@@ -1015,7 +1015,7 @@ func TestExecuteOpenAIRouteToClaudeCompactsOnQuota(t *testing.T) {
 		}
 	}
 	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
-		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6.1-sol", KeepRecentMessages: 2,
+		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6-luna", KeepRecentMessages: 2,
 	}}})
 	payload := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"work"}]}`)
 	resp, err := manager.Execute(context.Background(), []string{"claude"}, cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
@@ -1112,10 +1112,10 @@ func TestMaybeCompactClaudeHandoffHistoryOnFirstRequest(t *testing.T) {
 	manager := NewManager(nil, nil, nil)
 	manager.RegisterExecutor(&claudeHandoffFlowCompactorExecutor{})
 	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
-		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6.1-sol", KeepRecentMessages: 2,
+		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6-luna", KeepRecentMessages: 2,
 	}}})
 	const authID = "claude-startup-compactor-auth"
-	const model = "gpt-6.1-sol"
+	const model = "gpt-6-luna"
 	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
 	if _, err := manager.Register(context.Background(), &Auth{ID: authID, Provider: "codex", Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}); err != nil {
@@ -1142,10 +1142,10 @@ func TestMaybeCompactClaudeHandoffHistoryAfterThirtyMinutesIdle(t *testing.T) {
 	compactor := &claudeHandoffPayloadRecordingCompactorExecutor{}
 	manager.RegisterExecutor(compactor)
 	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
-		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6.1-sol", KeepRecentMessages: 2,
+		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6-luna", KeepRecentMessages: 2,
 	}}})
 	const authID = "claude-idle-compactor-auth"
-	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "gpt-6.1-sol"}})
+	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "gpt-6-luna"}})
 	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
 	if _, err := manager.Register(context.Background(), &Auth{ID: authID, Provider: "codex", Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}); err != nil {
 		t.Fatalf("Register() error = %v", err)
@@ -1177,7 +1177,7 @@ func TestExecuteStreamOpenAIRouteToClaudeCompactsBootstrapErrorBeforeNextOAuthAc
 	manager.RegisterExecutor(&claudeHandoffFlowExecutor{})
 	manager.RegisterExecutor(&claudeHandoffFlowCompactorExecutor{})
 	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
-		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6.1-sol", KeepRecentMessages: 2,
+		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6-luna", KeepRecentMessages: 2,
 	}}})
 	for _, entry := range []struct {
 		id       string
@@ -1186,7 +1186,7 @@ func TestExecuteStreamOpenAIRouteToClaudeCompactsBootstrapErrorBeforeNextOAuthAc
 	}{
 		{id: "claude-a", provider: "claude", model: "claude-opus-5-5"},
 		{id: "claude-b", provider: "claude", model: "claude-opus-5-5"},
-		{id: "codex-a", provider: "codex", model: "gpt-6.1-sol"},
+		{id: "codex-a", provider: "codex", model: "gpt-6-luna"},
 	} {
 		registry.GetGlobalRegistry().RegisterClient(entry.id, entry.provider, []*registry.ModelInfo{{ID: entry.model}})
 		entryID := entry.id

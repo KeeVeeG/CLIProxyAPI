@@ -23,11 +23,11 @@ import (
 const (
 	claudeHandoffInternalMetadataKey  = "cliproxy.claude_handoff.internal"
 	claudeHandoffCompactedMetadataKey = "cliproxy.claude_handoff.compacted"
-	// Keep compactor input below the effective gpt-6.1-sol window while avoiding
-	// dozens of serial calls for giant tool results. Request-only tool schemas
-	// are removed before splitting, and a context-too-large response halves the
-	// limit for that chunk and retries it.
-	claudeHandoffCompactorChunkBytes = 768 * 1024
+	// Keep each compactor request conservative for the default gpt-6-luna
+	// context window. Request-only tool schemas are removed before splitting,
+	// and a context-too-large response halves the limit for that chunk and
+	// retries it.
+	claudeHandoffCompactorChunkBytes = 512 * 1024
 	claudeHandoffSummaryTag          = "<cli-proxy-claude-handoff>"
 	claudeHandoffSummaryEndTag       = "</cli-proxy-claude-handoff>"
 	claudeHandoffIdleCompactAfter    = 30 * time.Minute
@@ -54,7 +54,7 @@ func claudeHandoffConfig(cfg *internalconfig.Config) internalconfig.ClaudeHandof
 		out.CompactorProvider = "codex"
 	}
 	if strings.TrimSpace(out.CompactorModel) == "" {
-		out.CompactorModel = "gpt-6.1-sol"
+		out.CompactorModel = "gpt-6-luna"
 	}
 	if out.CompactorMaxOutputTokens <= 0 {
 		out.CompactorMaxOutputTokens = 8192

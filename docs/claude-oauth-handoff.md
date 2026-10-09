@@ -8,7 +8,7 @@ When Claude returns HTTP 429 with a structured `rate_limit_error` message that
 indicates the account or subscription limit would be exceeded, the conductor
 holds the request before selecting the next Claude credential. It sends the
 original Claude request to the configured compactor route (by default the
-`codex` OAuth provider and `gpt-6.1-sol`) using an OpenAI Responses request with
+`codex` OAuth provider and `gpt-6-luna`) using an OpenAI Responses request with
 `reasoning.effort: xhigh`. The summary is inserted into a small Claude user
 message, recent safe user/assistant turns are retained, and the next Claude
 credential receives the rewritten request. The original request envelope
@@ -22,7 +22,7 @@ routing:
   claude-handoff:
     enabled: true
     compactor-provider: codex
-    compactor-model: gpt-6.1-sol
+    compactor-model: gpt-6-luna
     compactor-max-output-tokens: 8192
     compactor-retry-max-interval: 30
     keep-recent-messages: 8
@@ -49,7 +49,7 @@ large Claude transcript is split at message boundaries, each part is compacted
 through the configured OpenAI OAuth pool, and the resulting summaries are
 combined. If one compactor credential returns `context_too_large`, the next
 credential is still tried before the chunk is reduced. This is needed because
-the effective `gpt-6.1-sol` request window can be smaller than the larger
+the effective `gpt-6-luna` request window can be smaller than the larger
 client-advertised maximum.
 
 Claude handoff state is keyed by the normalized session/conversation ID already
