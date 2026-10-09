@@ -1294,12 +1294,15 @@ func sanitizeClaudeHandoffMessageSliceWithBudget(tail []gjson.Result, maxBytes i
 	for index := len(out) - 1; index >= 0; index-- {
 		messageBytes := len([]byte(out[index]))
 		if messageBytes > maxBytes || used+messageBytes > maxBytes {
-			// Never discard the newest turn solely because it is larger than the
-			// soft budget; the current user request must remain actionable. The
-			// budget still bounds all older retained turns.
+			// Keep the current turn represented, but never copy an unbounded
+			// tool result or image into the replacement request. A bounded
+			// placeholder preserves the role/turn boundary while the compact
+			// summary carries the omitted details.
 			if index == len(out)-1 {
-				start = index
-				break
+				if placeholder := boundedClaudeHandoffMessage(out[index], maxBytes); placeholder != "" {
+					out[index] = placeholder
+					start = index
+				}
 			}
 			break
 		}
@@ -1315,6 +1318,31 @@ func sanitizeClaudeHandoffMessageSliceWithBudget(tail []gjson.Result, maxBytes i
 		selectedMessages = append(selectedMessages, gjson.Parse(raw))
 	}
 	return sanitizeClaudeHandoffMessageSliceUnbounded(selectedMessages)
+}
+
+func boundedClaudeHandoffMessage(raw string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	role := gjson.Get(raw, "role").String()
+	if role != "user" && role != "assistant" {
+		return ""
+	}
+	message, _ := json.Marshal(map[string]any{
+		"role": role,
+		"content": []map[string]string{{
+			"type": "text",
+			"text": "[Claude handoff omitted an oversized recent message; see compact summary.]",
+		}},
+	})
+	if len(message) <= maxBytes {
+		return string(message)
+	}
+	minimal, _ := json.Marshal(map[string]string{"role": role, "content": "."})
+	if len(minimal) <= maxBytes {
+		return string(minimal)
+	}
+	return ""
 }
 
 func sanitizeClaudeHandoffMessageSliceUnbounded(tail []gjson.Result) []string {

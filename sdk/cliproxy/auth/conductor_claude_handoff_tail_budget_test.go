@@ -59,8 +59,9 @@ func TestClaudeHandoffRewriteAppliesConfiguredTailBudget(t *testing.T) {
 		t.Fatalf("rewriteClaudeHandoffPayloadBudget() error = %v", err)
 	}
 	messages := gjson.GetBytes(rewritten, "messages").Array()
+	t.Logf("rewritten=%s", rewritten)
 	if len(messages) != 2 {
-		t.Fatalf("rewritten messages = %d, want summary plus continuation after oversized tail", len(messages))
+		t.Fatalf("rewritten messages = %d, want summary plus continuation after oversized tail: %s", len(messages), rewritten)
 	}
 	if messages[0].Get("role").String() != "user" || messages[1].Get("role").String() != "user" {
 		t.Fatalf("rewritten roles = %q,%q, want user,user", messages[0].Get("role").String(), messages[1].Get("role").String())
