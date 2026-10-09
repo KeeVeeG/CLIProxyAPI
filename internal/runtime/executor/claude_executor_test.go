@@ -990,6 +990,58 @@ func TestClaudeExecutor_ConfirmedClaudeCodeWithoutCacheControlPreservesContent(t
 	}
 }
 
+func TestClaudeExecutor_NativeOAuthHandoffSummaryKeepsBreakpointAndOneHourTTL(t *testing.T) {
+	var seenBody []byte
+	var seenHeaders http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenBody, _ = io.ReadAll(r.Body)
+		seenHeaders = r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg_handoff","type":"message","model":"claude-opus-5-5","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	const sessionID = "11111111-2222-4333-8444-555555555555"
+	incoming := http.Header{
+		"User-Agent":               {"claude-cli/2.1.280 (external, cli)"},
+		"X-App":                    {"cli"},
+		"Anthropic-Beta":           {"claude-code-20250219"},
+		"X-Claude-Code-Session-Id": {sessionID},
+	}
+	payload := []byte(`{"model":"claude-opus-5-5","messages":[
+{"role":"user","content":[{"type":"text","text":"<cli-proxy-claude-handoff>summary</cli-proxy-claude-handoff>","cache_control":{"type":"ephemeral"}}]},
+{"role":"user","content":[{"type":"text","text":"turn-1","cache_control":{"type":"ephemeral"}}]},
+{"role":"user","content":[{"type":"text","text":"turn-2","cache_control":{"type":"ephemeral"}}]},
+{"role":"user","content":[{"type":"text","text":"turn-3","cache_control":{"type":"ephemeral"}}]},
+{"role":"user","content":[{"type":"text","text":"current","cache_control":{"type":"ephemeral"}}]}]}`)
+	auth := &cliproxyauth.Auth{ID: "native-handoff-oauth", Metadata: claudeOAuthTestMetadata(), Attributes: map[string]string{
+		"api_key": "sk-ant-oat-native-handoff", "base_url": server.URL,
+	}}
+	executor := NewClaudeExecutor(&config.Config{})
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude, OriginalRequest: payload, Headers: incoming,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if got := countCacheControls(seenBody); got > 4 {
+		t.Fatalf("wire cache breakpoints = %d, want <= 4: %s", got, seenBody)
+	}
+	var summaryTTL string
+	for _, block := range gjson.GetBytes(seenBody, "messages.0.content").Array() {
+		if strings.Contains(block.Get("text").String(), "<cli-proxy-claude-handoff>") {
+			summaryTTL = block.Get("cache_control.ttl").String()
+			break
+		}
+	}
+	if summaryTTL != "1h" {
+		t.Fatalf("handoff summary ttl = %q, want 1h: %s", summaryTTL, seenBody)
+	}
+	if !strings.Contains(seenHeaders.Get("Anthropic-Beta"), claudeExtendedCacheTTLBeta) {
+		t.Fatalf("wire betas = %q, want %s", seenHeaders.Get("Anthropic-Beta"), claudeExtendedCacheTTLBeta)
+	}
+}
+
 func TestClaudeExecutor_ConfirmedCLIForwardsNativeOpus55Shape(t *testing.T) {
 	var seenBody []byte
 	var seenHeaders http.Header
@@ -3289,6 +3341,35 @@ func TestEnforceCacheControlLimit_ToolOnlyPayloadStillRespectsLimit(t *testing.T
 	}
 	if !gjson.GetBytes(out, "tools.4.cache_control").Exists() {
 		t.Fatalf("last tool cache_control should be preserved when possible")
+	}
+}
+
+func TestEnforceCacheControlLimitPreservesClaudeHandoffSummary(t *testing.T) {
+	payload := []byte(`{"messages":[
+{"role":"user","content":[{"type":"text","text":"<cli-proxy-claude-handoff>summary</cli-proxy-claude-handoff>","cache_control":{"type":"ephemeral"}}]},
+{"role":"user","content":[{"type":"text","text":"rolling-1","cache_control":{"type":"ephemeral"}}]},
+{"role":"user","content":[{"type":"text","text":"rolling-2","cache_control":{"type":"ephemeral"}}]},
+{"role":"user","content":[{"type":"text","text":"rolling-3","cache_control":{"type":"ephemeral"}}]},
+{"role":"user","content":[{"type":"text","text":"rolling-4","cache_control":{"type":"ephemeral"}}]}]}`)
+	out := enforceCacheControlLimit(payload, 4)
+	if got := countCacheControls(out); got > 4 {
+		t.Fatalf("cache breakpoints = %d, want <= 4: %s", got, out)
+	}
+	if !gjson.GetBytes(out, "messages.0.content.0.cache_control").Exists() {
+		t.Fatalf("handoff summary breakpoint was removed: %s", out)
+	}
+}
+
+func TestUpgradeClaudeHandoffSummaryCacheTTL(t *testing.T) {
+	payload := []byte(`{"messages":[
+{"role":"user","content":[{"type":"text","text":"<cli-proxy-claude-handoff>summary</cli-proxy-claude-handoff>","cache_control":{"type":"ephemeral"}}]},
+{"role":"user","content":[{"type":"text","text":"current","cache_control":{"type":"ephemeral"}}]}]}`)
+	out := upgradeClaudeHandoffSummaryCacheTTL(payload, "1h")
+	if got := gjson.GetBytes(out, "messages.0.content.0.cache_control.ttl").String(); got != "1h" {
+		t.Fatalf("handoff summary ttl = %q, want 1h: %s", got, out)
+	}
+	if gjson.GetBytes(out, "messages.1.content.0.cache_control.ttl").Exists() {
+		t.Fatalf("unrelated rolling marker was modified: %s", out)
 	}
 }
 

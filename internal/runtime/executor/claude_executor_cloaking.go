@@ -2132,32 +2132,42 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 
 	messages := gjson.GetBytes(payload, "messages")
 	if messages.IsArray() {
-		messages.ForEach(func(msgIdx, msg gjson.Result) bool {
-			if excess <= 0 {
-				return false
-			}
-			content := msg.Get("content")
-			if !content.IsArray() {
-				return true
-			}
-			content.ForEach(func(itemIdx, item gjson.Result) bool {
+		// A handoff summary is the compacted context's stable message prefix.
+		// Preserve its breakpoint while there are other message markers that can
+		// be removed; otherwise the generic earliest-first pass would discard the
+		// summary before the volatile rolling markers.
+		for pass := 0; pass < 2 && excess > 0; pass++ {
+			messages = gjson.GetBytes(payload, "messages")
+			messages.ForEach(func(msgIdx, msg gjson.Result) bool {
 				if excess <= 0 {
 					return false
 				}
-				if !item.Get("cache_control").Exists() {
+				content := msg.Get("content")
+				if !content.IsArray() {
 					return true
 				}
-				path := fmt.Sprintf("messages.%d.content.%d.cache_control", int(msgIdx.Int()), int(itemIdx.Int()))
-				updated, errDel := sjson.DeleteBytes(payload, path)
-				if errDel != nil {
+				content.ForEach(func(itemIdx, item gjson.Result) bool {
+					if excess <= 0 {
+						return false
+					}
+					if !item.Get("cache_control").Exists() {
+						return true
+					}
+					if pass == 0 && claudeHandoffSummaryCacheBlock(item) {
+						return true
+					}
+					path := fmt.Sprintf("messages.%d.content.%d.cache_control", int(msgIdx.Int()), int(itemIdx.Int()))
+					updated, errDel := sjson.DeleteBytes(payload, path)
+					if errDel != nil {
+						return true
+					}
+					payload = updated
+					excess--
 					return true
-				}
-				payload = updated
-				excess--
+				})
 				return true
 			})
-			return true
-		})
+		}
 	}
 	if excess <= 0 {
 		return payload
@@ -2206,6 +2216,48 @@ func enforceCacheControlLimit(payload []byte, maxBlocks int) []byte {
 		})
 	}
 
+	return payload
+}
+
+func claudeHandoffSummaryCacheBlock(block gjson.Result) bool {
+	if block.Get("type").String() != "text" {
+		return false
+	}
+	text := block.Get("text").String()
+	return strings.Contains(text, "<cli-proxy-claude-handoff>") ||
+		strings.Contains(text, "\\u003ccli-proxy-claude-handoff\\u003e")
+}
+
+// upgradeClaudeHandoffSummaryCacheTTL applies the same one-hour TTL used by
+// native Claude OAuth requests to the synthetic handoff marker. Native CLI
+// requests bypass CPA-owned marker placement, so the generic TTL upgrade would
+// otherwise leave this new prefix at the bare five-minute default.
+func upgradeClaudeHandoffSummaryCacheTTL(payload []byte, ttl string) []byte {
+	if ttl == "" || len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return payload
+	}
+	messages.ForEach(func(msgIdx, msg gjson.Result) bool {
+		content := msg.Get("content")
+		if !content.IsArray() {
+			return true
+		}
+		content.ForEach(func(itemIdx, item gjson.Result) bool {
+			if !claudeHandoffSummaryCacheBlock(item) || item.Get("cache_control.ttl").Exists() {
+				return true
+			}
+			path := fmt.Sprintf("messages.%d.content.%d.cache_control.ttl", int(msgIdx.Int()), int(itemIdx.Int()))
+			updated, errSet := sjson.SetBytes(payload, path, ttl)
+			if errSet == nil {
+				payload = updated
+			}
+			return true
+		})
+		return true
+	})
 	return payload
 }
 
