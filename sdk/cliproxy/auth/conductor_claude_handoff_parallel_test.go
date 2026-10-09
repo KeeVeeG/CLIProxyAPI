@@ -320,6 +320,9 @@ func TestClaudeHandoffCompactorParallelNestedProbeDoesNotCallOuterCallbackConcur
 	if got := callbackMax.Load(); got > 1 {
 		t.Fatalf("outer selected-auth callback ran concurrently: max active = %d", got)
 	}
+	if got := executor.maxActive.Load(); got > int32(claudeHandoffCompactorParallelism) {
+		t.Fatalf("nested compactor calls exceeded global worker limit: max active = %d, limit = %d", got, claudeHandoffCompactorParallelism)
+	}
 }
 
 func minInt(left, right int) int {
