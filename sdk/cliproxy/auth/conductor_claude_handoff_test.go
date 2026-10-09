@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -148,6 +149,23 @@ func TestClaudeHandoffCompactorPayloadDropsRequestToolSchemas(t *testing.T) {
 	}
 	if gjson.GetBytes(payload, "tools").IsArray() == false {
 		t.Fatalf("test payload unexpectedly lost original tools: %s", payload)
+	}
+}
+
+func TestClaudeHandoffCompactorPayloadRemovesMediaAndSignatures(t *testing.T) {
+	payload := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"assistant","content":[{"type":"thinking","thinking":"private"},{"type":"text","text":"visible","signature":"large-signature"},{"type":"tool_result","tool_use_id":"tool-1","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + strings.Repeat("A", 10000) + `"}}]}]}]}`)
+	compactorPayload, err := claudeHandoffCompactorPayload(payload)
+	if err != nil {
+		t.Fatalf("claudeHandoffCompactorPayload() error = %v", err)
+	}
+	if bytes.Contains(compactorPayload, []byte("large-signature")) || bytes.Contains(compactorPayload, []byte("AAAA")) {
+		t.Fatalf("compactor payload retained provider media/signature bytes: %d bytes", len(compactorPayload))
+	}
+	if gjson.GetBytes(compactorPayload, "messages.0.content.0.type").String() != "text" {
+		t.Fatalf("thinking block was not removed: %s", compactorPayload)
+	}
+	if !bytes.Contains(compactorPayload, []byte("image omitted from handoff compaction")) {
+		t.Fatalf("image placeholder missing: %s", compactorPayload)
 	}
 }
 
@@ -571,7 +589,9 @@ func TestClaudeHandoffStateIgnoresRollingCacheMarkersAndSystemNotifications(t *t
 {"role":"user","content":"follow-up"},
 {"role":"system","content":"latest notification"}
 ]}`)
-	rewritten, _ := manager.applyClaudeHandoffState(cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: nextPayload}, claudeHandoffOptions(), []string{"claude"})
+	opts := claudeHandoffOptions()
+	opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = "session-test"
+	rewritten, _ := manager.applyClaudeHandoffState(cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: nextPayload}, opts, []string{"claude"})
 	if err := json.Unmarshal(rewritten.Payload, &map[string]any{}); err != nil {
 		t.Fatalf("rewritten payload is invalid JSON: %v", err)
 	}
@@ -590,6 +610,60 @@ func TestClaudeHandoffStateIgnoresRollingCacheMarkersAndSystemNotifications(t *t
 	}
 	if messages[len(messages)-1].Get("role").String() != "user" {
 		t.Fatalf("rewritten request ended with role %q, want user", messages[len(messages)-1].Get("role").String())
+	}
+}
+
+func TestApplyClaudeHandoffStateInvalidatesMismatchedBoundary(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{Enabled: true, KeepRecentMessages: 1}}})
+	basePayload := []byte(`{"model":"claude-opus-5-5","messages":[
+{"role":"user","content":"before"},
+{"role":"assistant","content":"answer"},
+{"role":"user","content":"boundary"}
+]}`)
+	manager.rememberClaudeHandoffSummaryForPayload("mismatch-session", `{"goal":"stale"}`, basePayload)
+	// Mutating the pre-boundary transcript must never silently reuse the old
+	// summary with an arbitrary last-N window.
+	nextPayload := []byte(`{"model":"claude-opus-5-5","messages":[
+{"role":"user","content":"changed before"},
+{"role":"assistant","content":"answer"},
+{"role":"user","content":"boundary"},
+{"role":"assistant","content":"new answer"},
+{"role":"user","content":"new request"}
+]}`)
+	opts := claudeHandoffOptions()
+	opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = "mismatch-session"
+	rewritten, _ := manager.applyClaudeHandoffState(cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: nextPayload}, opts, []string{"claude"})
+	if !bytes.Equal(rewritten.Payload, nextPayload) {
+		t.Fatalf("mismatched boundary was rewritten with stale summary: %s", rewritten.Payload)
+	}
+	if _, ok := claudeHandoffSummaryFromState(manager, "mismatch-session"); ok {
+		t.Fatal("mismatched boundary state was not invalidated")
+	}
+}
+
+func TestApplyClaudeHandoffStateSkipsRewriteBeforeIdleRefresh(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{Enabled: true, KeepRecentMessages: 1}}})
+	basePayload := []byte(`{"model":"claude-opus-5-5","messages":[
+{"role":"user","content":"before"},
+{"role":"assistant","content":"answer"},
+{"role":"user","content":"boundary"}
+]}`)
+	manager.rememberClaudeHandoffSummaryForPayload("idle-session", `{"goal":"old"}`, basePayload)
+	manager.rememberClaudeHandoffRequest("idle-session", time.Now().Add(-31*time.Minute))
+	nextPayload := []byte(`{"model":"claude-opus-5-5","messages":[
+{"role":"user","content":"before"},
+{"role":"assistant","content":"answer"},
+{"role":"user","content":"boundary"},
+{"role":"assistant","content":"post-boundary"},
+{"role":"user","content":"new request"}
+]}`)
+	opts := claudeHandoffOptions()
+	opts.Metadata[cliproxyexecutor.CanonicalSessionIDMetadataKey] = "idle-session"
+	rewritten, _ := manager.applyClaudeHandoffState(cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: nextPayload}, opts, []string{"claude"})
+	if !bytes.Equal(rewritten.Payload, nextPayload) {
+		t.Fatalf("idle request was rewritten before fresh compaction: %s", rewritten.Payload)
 	}
 }
 

@@ -27,6 +27,7 @@ routing:
     compactor-retry-max-interval: 30
     keep-recent-messages: 8
     max-summary-bytes: 262144
+    max-tail-bytes: 131072
     fail-open: false
 ```
 

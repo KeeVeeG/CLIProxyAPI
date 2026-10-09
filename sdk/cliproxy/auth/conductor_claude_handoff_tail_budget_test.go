@@ -1,0 +1,57 @@
+package auth
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/tidwall/gjson"
+)
+
+func TestClaudeHandoffTailBudgetKeepsRecentCompleteMessages(t *testing.T) {
+	tail := make([]gjson.Result, 0, 8)
+	for i := 0; i < 8; i++ {
+		raw := fmt.Sprintf(`{"role":"user","content":"turn-%d-%s"}`, i, strings.Repeat("x", 48))
+		tail = append(tail, gjson.Parse(raw))
+	}
+	const maxBytes = 180
+	got := sanitizeClaudeHandoffMessageSliceWithBudget(tail, maxBytes)
+	var total int
+	for _, raw := range got {
+		total += len([]byte(raw))
+	}
+	if total > maxBytes {
+		t.Fatalf("bounded tail size = %d bytes, want <= %d: %v", total, maxBytes, got)
+	}
+	if len(got) == 0 || !strings.Contains(got[len(got)-1], "turn-7") {
+		t.Fatalf("bounded tail did not retain the newest complete message: %v", got)
+	}
+	if strings.Contains(strings.Join(got, ""), "turn-0") {
+		t.Fatalf("bounded tail retained an old message after reaching its budget: %v", got)
+	}
+}
+
+func TestClaudeHandoffTailBudgetDoesNotSplitToolExchange(t *testing.T) {
+	tail := []gjson.Result{
+		gjson.Parse(`{"role":"user","content":"old"}`),
+		gjson.Parse(`{"role":"assistant","content":[{"type":"tool_use","id":"paired","name":"read_file","input":{}}]}`),
+		gjson.Parse(`{"role":"user","content":[{"type":"tool_result","tool_use_id":"paired","content":"result"}]}`),
+		gjson.Parse(`{"role":"user","content":"latest request"}`),
+	}
+	got := sanitizeClaudeHandoffMessageSliceWithBudget(tail, 220)
+	text := strings.Join(got, "")
+	if strings.Contains(text, `"tool_result"`) && !strings.Contains(text, `"tool_use"`) {
+		t.Fatalf("bounded tail retained an orphan tool_result: %v", got)
+	}
+	if !strings.Contains(text, "latest request") {
+		t.Fatalf("bounded tail lost the newest user request: %v", got)
+	}
+}
+
+func TestClaudeHandoffTailBudgetDefaultIsBounded(t *testing.T) {
+	cfg := claudeHandoffConfig(&internalconfig.Config{})
+	if cfg.MaxTailBytes != claudeHandoffDefaultMaxTailBytes {
+		t.Fatalf("default max tail bytes = %d, want %d", cfg.MaxTailBytes, claudeHandoffDefaultMaxTailBytes)
+	}
+}

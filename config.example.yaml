@@ -189,6 +189,9 @@ routing:
     compactor-retry-max-interval: 30
     keep-recent-messages: 8
     max-summary-bytes: 262144
+    # Bounds the retained post-summary Claude transcript. Complete messages
+    # are kept from the end until this byte budget is reached.
+    max-tail-bytes: 131072
     fail-open: false
 
   # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
