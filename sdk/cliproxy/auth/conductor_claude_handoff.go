@@ -519,9 +519,17 @@ func splitClaudeHandoffPayload(payload []byte, maxBytes int) ([][]byte, error) {
 		// Split a giant message's JSON representation into valid synthetic
 		// messages. The compactor is instructed to preserve concrete facts, so
 		// retaining every fragment is safer than truncating it.
-		fragmentBytes := maxBytes / 4
+		// The synthetic wrapper is small compared with a giant tool result.
+		// Start close to the full safe budget to avoid turning a multi-megabyte
+		// message into dozens of compactor calls. The adaptive loop below still
+		// halves the fragment when JSON escaping or envelope overhead exceeds
+		// the budget.
+		fragmentBytes := maxBytes - 16*1024
 		if fragmentBytes < 4096 {
-			fragmentBytes = 4096
+			fragmentBytes = maxBytes / 2
+			if fragmentBytes < 4096 {
+				fragmentBytes = 4096
+			}
 		}
 		raw := string(message)
 		for start, part := 0, 1; start < len(raw); part++ {
