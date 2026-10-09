@@ -44,6 +44,14 @@ an empty response, or an oversized summary fail immediately. With the default
 Claude account after a failed compaction. Set `fail-open: true` only if losing
 the request is worse than paying for the full context.
 
+The compactor keeps each OpenAI request below a conservative input budget. A
+large Claude transcript is split at message boundaries, each part is compacted
+through the configured OpenAI OAuth pool, and the resulting summaries are
+combined. If one compactor credential returns `context_too_large`, the next
+credential is still tried before the chunk is reduced. This is needed because
+the effective `gpt-6.1-sol` request window can be smaller than the larger
+client-advertised maximum.
+
 Claude handoff state is keyed by the normalized session/conversation ID already
 extracted by CLIProxyAPI. After a proxy restart, the first request that already
 contains conversation history is compacted before the first Claude account is

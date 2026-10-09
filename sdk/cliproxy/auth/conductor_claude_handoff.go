@@ -353,6 +353,18 @@ func (m *Manager) applyClaudeHandoffState(req cliproxyexecutor.Request, opts cli
 	return req, opts
 }
 
+// PrepareClaudeHandoff applies the request-scoped Claude handoff state before
+// a model-router plugin executes. This lets a plugin fallback see the compacted
+// envelope instead of receiving a compactor error and forwarding the original
+// oversized transcript to another model.
+func (m *Manager) PrepareClaudeHandoff(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, providers []string) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
+	if m == nil {
+		return req, opts, nil
+	}
+	req, opts = m.applyClaudeHandoffState(req, opts, providers)
+	return m.maybeCompactClaudeHandoffHistory(ctx, req, opts, providers)
+}
+
 // maybeCompactClaudeHandoffHistory protects the first request after a process
 // restart. The in-memory summary map is empty after restart, so an already
 // large Claude transcript would otherwise be sent uncompressed to the first
@@ -507,7 +519,7 @@ func splitClaudeHandoffPayload(payload []byte, maxBytes int) ([][]byte, error) {
 		// Split a giant message's JSON representation into valid synthetic
 		// messages. The compactor is instructed to preserve concrete facts, so
 		// retaining every fragment is safer than truncating it.
-		fragmentBytes := maxBytes / 2
+		fragmentBytes := maxBytes / 4
 		if fragmentBytes < 4096 {
 			fragmentBytes = 4096
 		}
@@ -517,16 +529,25 @@ func splitClaudeHandoffPayload(payload []byte, maxBytes int) ([][]byte, error) {
 			if end > len(raw) {
 				end = len(raw)
 			}
-			fragment, _ := json.Marshal(map[string]any{
-				"role":    "user",
-				"content": fmt.Sprintf("Original Claude message fragment %d:\n%s", part, raw[start:end]),
-			})
-			fragmentPayload, err := claudeHandoffPayloadWithMessages(payload, []json.RawMessage{fragment})
-			if err != nil {
-				return nil, err
+			for {
+				fragment, _ := json.Marshal(map[string]any{
+					"role":    "user",
+					"content": fmt.Sprintf("Original Claude message fragment %d:\n%s", part, raw[start:end]),
+				})
+				fragmentPayload, err := claudeHandoffPayloadWithMessages(payload, []json.RawMessage{fragment})
+				if err != nil {
+					return nil, err
+				}
+				if len(fragmentPayload) <= maxBytes {
+					chunks = append(chunks, fragmentPayload)
+					start = end
+					break
+				}
+				if end-start <= 1024 {
+					return nil, fmt.Errorf("giant Claude message fragment cannot fit compactor chunk")
+				}
+				end = start + (end-start)/2
 			}
-			chunks = append(chunks, fragmentPayload)
-			start = end
 		}
 	}
 	if err := flush(); err != nil {

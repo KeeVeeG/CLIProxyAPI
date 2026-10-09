@@ -63,6 +63,34 @@ func TestSplitClaudeHandoffPayloadKeepsChunksBelowCompactorLimit(t *testing.T) {
 	}
 }
 
+func TestSplitClaudeHandoffPayloadEscapedGiantMessageStaysBelowLimit(t *testing.T) {
+	payload, err := json.Marshal(map[string]any{
+		"model": "claude-opus-5-5",
+		"messages": []map[string]any{{
+			"role":    "user",
+			"content": strings.Repeat(`quote " slash \\ tool_result `, 12000),
+		}, {
+			"role":    "user",
+			"content": "latest request",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	chunks, err := splitClaudeHandoffPayload(payload, 32*1024)
+	if err != nil {
+		t.Fatalf("splitClaudeHandoffPayload() error = %v", err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %d, want at least 2", len(chunks))
+	}
+	for index, chunk := range chunks {
+		if len(chunk) > 32*1024 {
+			t.Fatalf("chunk %d has %d bytes, want <= %d", index, len(chunk), 32*1024)
+		}
+	}
+}
+
 type claudeHandoffContextRotationExecutor struct {
 	calls atomic.Int32
 }

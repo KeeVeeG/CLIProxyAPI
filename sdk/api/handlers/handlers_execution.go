@@ -212,6 +212,16 @@ func (h *BaseAPIHandler) executeWithPluginExecutor(ctx context.Context, entryPro
 		return nil, nil, interceptErr
 	}
 	execCtx = enrichContextWithSessionHierarchy(execCtx, opts.Headers, req.Payload, opts.Metadata)
+	if h.AuthManager != nil && strings.EqualFold(strings.TrimSpace(entryProtocol), "claude") {
+		var handoffErr error
+		req, opts, handoffErr = h.AuthManager.PrepareClaudeHandoff(execCtx, req, opts, []string{"claude"})
+		if handoffErr != nil {
+			errMsg := executionErrorMessage(handoffErr)
+			lifecycle.completeError(execCtx, errMsg)
+			return nil, nil, errMsg
+		}
+		execCtx = enrichContextWithSessionHierarchy(execCtx, opts.Headers, req.Payload, opts.Metadata)
+	}
 	var reporter *helps.UsageReporter
 	if !execOptions.InternalSource {
 		reporter = helps.NewUsageReporter(execCtx, executorPluginID, modelName, nil)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
@@ -63,6 +64,19 @@ func (h *BaseAPIHandler) streamWithPluginExecutor(ctx context.Context, entryProt
 		return nil, nil, errChan
 	}
 	execCtx = enrichContextWithSessionHierarchy(execCtx, opts.Headers, req.Payload, opts.Metadata)
+	if h.AuthManager != nil && strings.EqualFold(strings.TrimSpace(entryProtocol), "claude") {
+		var handoffErr error
+		req, opts, handoffErr = h.AuthManager.PrepareClaudeHandoff(execCtx, req, opts, []string{"claude"})
+		if handoffErr != nil {
+			errMsg := executionErrorMessage(handoffErr)
+			lifecycle.completeError(execCtx, errMsg)
+			errChan := make(chan *interfaces.ErrorMessage, 1)
+			errChan <- errMsg
+			close(errChan)
+			return nil, nil, errChan
+		}
+		execCtx = enrichContextWithSessionHierarchy(execCtx, opts.Headers, req.Payload, opts.Metadata)
+	}
 	var reporter *helps.UsageReporter
 	if !execOptions.InternalSource {
 		reporter = helps.NewUsageReporter(execCtx, executorPluginID, modelName, nil)
