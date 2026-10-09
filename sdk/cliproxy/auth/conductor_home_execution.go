@@ -16,6 +16,12 @@ func (m *Manager) executeHome(ctx context.Context, providers []string, req clipr
 		defer unlockSession()
 	}
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
+	// Internal handoff compaction should probe every matching OAuth account;
+	// the user-facing credential cap must not prematurely trigger public model
+	// fallback when one compactor account is exhausted.
+	if claudeHandoffInternal(opts) {
+		maxRetryCredentials = 0
+	}
 	retryModel := authSelectionModelFromOptions(opts, req.Model)
 	homeRetryLimit := -1
 	attempt := 0
@@ -286,7 +292,7 @@ func (m *Manager) executeHomeOnce(ctx context.Context, providers []string, req c
 				}
 				continue
 			}
-			if isRequestInvalidError(errExecute) {
+			if isRequestInvalidError(errExecute) && !(claudeHandoffInternal(execOpts) && claudeHandoffContextTooLarge(errExecute)) {
 				releaseAttempt()
 				selection.End("request_invalid")
 				return cliproxyexecutor.Response{}, errExecute
