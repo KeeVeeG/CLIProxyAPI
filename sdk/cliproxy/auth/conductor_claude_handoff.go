@@ -23,11 +23,11 @@ import (
 const (
 	claudeHandoffInternalMetadataKey  = "cliproxy.claude_handoff.internal"
 	claudeHandoffCompactedMetadataKey = "cliproxy.claude_handoff.compacted"
-	// Keep each compactor request conservative for the default gpt-6-luna
-	// context window. Request-only tool schemas are removed before splitting,
+	// Use a larger chunk to keep long Claude requests within the client's
+	// request timeout. Request-only tool schemas are removed before splitting,
 	// and a context-too-large response halves the limit for that chunk and
-	// retries it.
-	claudeHandoffCompactorChunkBytes = 512 * 1024
+	// retries it, so a dense chunk remains safe.
+	claudeHandoffCompactorChunkBytes = 768 * 1024
 	claudeHandoffSummaryTag          = "<cli-proxy-claude-handoff>"
 	claudeHandoffSummaryEndTag       = "</cli-proxy-claude-handoff>"
 	claudeHandoffIdleCompactAfter    = 30 * time.Minute
