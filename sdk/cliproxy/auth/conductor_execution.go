@@ -126,6 +126,7 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 	if len(normalized) == 0 {
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	req, opts = m.applyHandoffState(req, opts, normalized)
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, false)
 		return resp, unwrapExecutionBoundaryError(errHome)
@@ -244,6 +245,7 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 	if len(normalized) == 0 {
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
+	req, opts = m.applyHandoffState(req, opts, normalized)
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 
@@ -498,6 +500,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 	attempted := make(map[string]struct{})
 	var lastErr error
 	var upstreamErr error
+	handoffAttempted := false
 	for {
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials {
 			if lastErr != nil {
@@ -656,6 +659,28 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 				}
 				if isResponsesCompactRequestFaultError(execOpts, errExec) || isRequestInvalidError(errExec) {
 					return cliproxyexecutor.Response{}, errExec
+				}
+				if !handoffAttempted && handoffConfig(m.runtimeConfigSnapshot()).Enabled && isClaudeHandoffCandidate(provider, execOpts, errExec) {
+					handoffAttempted = true
+					compacted, errHandoff := m.performClaudeHandoff(execCtx, req, execOpts, errExec)
+					if errHandoff != nil {
+						if !handoffConfig(m.runtimeConfigSnapshot()).FailOpen {
+							return cliproxyexecutor.Response{}, errHandoff
+						}
+					} else {
+						req.Payload = compacted
+						opts.OriginalRequest = bytes.Clone(compacted)
+						opts.Metadata = cloneSchedulerAnyMap(execOpts.Metadata)
+						// A successful handoff is itself a credential transition. If
+						// the caller capped this round at the exhausted credential,
+						// allow one replacement credential to receive the compacted
+						// request.
+						if maxRetryCredentials > 0 && maxRetryCredentials <= len(attempted) {
+							maxRetryCredentials++
+						}
+						authErr = errExec
+						break
+					}
 				}
 				authErr = errExec
 				if result.CredentialScope {
@@ -932,6 +957,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 	var lastErr error
 	var upstreamErr error
 	var roundTiming homeRetryRoundTiming
+	handoffAttempted := false
 	for {
 		allowSameAuthRetry := homeMode && homeSameAuthRetryPending && lastHomeAuthID != "" && homeSameAuthRetries[lastHomeAuthID] == 0
 		if maxRetryCredentials > 0 && len(attempted) >= maxRetryCredentials && !allowSameAuthRetry {
@@ -1216,6 +1242,22 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			}
 			if isRequestInvalidError(errStream) {
 				return nil, errStream
+			}
+			if !homeMode && !handoffAttempted && handoffConfig(m.runtimeConfigSnapshot()).Enabled && isClaudeHandoffCandidate(provider, execOpts, errStream) {
+				handoffAttempted = true
+				compacted, errHandoff := m.performClaudeHandoff(execCtx, req, execOpts, errStream)
+				if errHandoff != nil {
+					if !handoffConfig(m.runtimeConfigSnapshot()).FailOpen {
+						return nil, errHandoff
+					}
+				} else {
+					req.Payload = compacted
+					opts.OriginalRequest = bytes.Clone(compacted)
+					opts.Metadata = cloneSchedulerAnyMap(execOpts.Metadata)
+					if maxRetryCredentials > 0 && maxRetryCredentials <= len(attempted) {
+						maxRetryCredentials++
+					}
+				}
 			}
 			lastErr = errStream
 			if homeMode {

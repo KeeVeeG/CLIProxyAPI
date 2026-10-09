@@ -371,6 +371,39 @@ type RoutingConfig struct {
 	// When false, subagents are distributed across the credential pool via the fallback selector.
 	// Default: true. Ignored when SessionAffinity is false.
 	SessionAffinitySubagents *bool `yaml:"session-affinity-subagents,omitempty" json:"session-affinity-subagents,omitempty"`
+
+	// Handoff configures quota-triggered context compaction for Claude Messages
+	// requests. The feature is opt-in because it sends the conversation body to
+	// the configured compactor provider and changes the request transcript seen
+	// by the next Claude credential.
+	Handoff HandoffConfig `yaml:"handoff,omitempty" json:"handoff,omitempty"`
+}
+
+// HandoffConfig configures the Claude OAuth quota handoff path.
+type HandoffConfig struct {
+	// Enabled enables quota-triggered context compaction and failover.
+	Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// CompactorProvider is the provider key used for the summary request.
+	// The default is "codex", which is the OAuth-backed OpenAI channel.
+	CompactorProvider string `yaml:"compactor-provider,omitempty" json:"compactor-provider,omitempty"`
+	// CompactorModel is the model used to write the summary.
+	CompactorModel string `yaml:"compactor-model,omitempty" json:"compactor-model,omitempty"`
+	// CompactorAuthID optionally pins one OpenAI OAuth credential for summaries.
+	CompactorAuthID string `yaml:"compactor-auth-id,omitempty" json:"compactor-auth-id,omitempty"`
+	// CompactorMaxOutputTokens bounds the summary response.
+	CompactorMaxOutputTokens int `yaml:"compactor-max-output-tokens,omitempty" json:"compactor-max-output-tokens,omitempty"`
+	// CompactorRetryMaxInterval caps the delay between temporary compactor failures.
+	// Retries continue until the request context is canceled or a non-temporary
+	// error is returned.
+	CompactorRetryMaxInterval int `yaml:"compactor-retry-max-interval,omitempty" json:"compactor-retry-max-interval,omitempty"`
+	// KeepRecentMessages controls how many recent Claude messages survive the handoff.
+	KeepRecentMessages int `yaml:"keep-recent-messages,omitempty" json:"keep-recent-messages,omitempty"`
+	// MaxSummaryBytes rejects unexpectedly large summaries instead of sending them
+	// to the replacement Claude account as an unbounded prompt.
+	MaxSummaryBytes int `yaml:"max-summary-bytes,omitempty" json:"max-summary-bytes,omitempty"`
+	// FailOpen allows the original request to continue through normal credential
+	// failover when compaction fails. The safe default is false.
+	FailOpen bool `yaml:"fail-open,omitempty" json:"fail-open,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
