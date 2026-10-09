@@ -21,7 +21,8 @@ import (
 // parallelClaudeHandoffCompactorExecutor deliberately blocks every chunk after
 // the probe. This makes the worker pool observable without relying on timing.
 type parallelClaudeHandoffCompactorExecutor struct {
-	expectedWorkers int
+	expectedWorkers      int
+	forceContextTooLarge bool
 
 	calls      atomic.Int32
 	active     atomic.Int32
@@ -87,6 +88,9 @@ func (e *parallelClaudeHandoffCompactorExecutor) Execute(ctx context.Context, au
 		case <-e.release:
 		case <-ctx.Done():
 			return cliproxyexecutor.Response{}, ctx.Err()
+		}
+		if e.forceContextTooLarge && !strings.Contains(text, "Original Claude message fragment") {
+			return cliproxyexecutor.Response{}, &Error{HTTPStatus: http.StatusBadRequest, Code: "context_too_large", Message: "input exceeds context window"}
 		}
 	}
 	response, err := json.Marshal(map[string]any{
@@ -252,6 +256,59 @@ func TestClaudeHandoffCompactorParallelChunksCancelSiblings(t *testing.T) {
 	}
 	if got := executor.active.Load(); got != 0 {
 		t.Fatalf("active compactor calls after cancellation = %d, want 0", got)
+	}
+}
+
+func TestClaudeHandoffCompactorParallelNestedProbeDoesNotCallOuterCallbackConcurrently(t *testing.T) {
+	executor := &parallelClaudeHandoffCompactorExecutor{forceContextTooLarge: true}
+	manager, payload, _ := newParallelClaudeHandoffTestManager(t, executor)
+	compactorPayload, err := claudeHandoffCompactorPayload(payload)
+	if err != nil {
+		t.Fatalf("claudeHandoffCompactorPayload() error = %v", err)
+	}
+	const maxBytes = 32 * 1024
+	chunks, err := splitClaudeHandoffPayload(compactorPayload, maxBytes)
+	if err != nil {
+		t.Fatalf("splitClaudeHandoffPayload() error = %v", err)
+	}
+	executor.expectedWorkers = minInt(claudeHandoffCompactorParallelism, len(chunks)-1)
+	executor.allStarted = make(chan struct{})
+	executor.release = make(chan struct{})
+	var callbackActive atomic.Int32
+	var callbackMax atomic.Int32
+	opts := claudeHandoffOptions()
+	opts.Metadata[cliproxyexecutor.SelectedAuthCallbackMetadataKey] = func(string) {
+		active := callbackActive.Add(1)
+		for {
+			max := callbackMax.Load()
+			if active <= max || callbackMax.CompareAndSwap(max, active) {
+				break
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+		callbackActive.Add(-1)
+	}
+	result := make(chan error, 1)
+	go func() {
+		_, compactErr := manager.compactClaudeHandoffContextWithLimit(context.Background(), payload, opts, claudeHandoffConfig(manager.runtimeConfigSnapshot()), maxBytes, 0)
+		result <- compactErr
+	}()
+	select {
+	case <-executor.allStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for parallel compactor workers")
+	}
+	close(executor.release)
+	select {
+	case compactErr := <-result:
+		if compactErr != nil {
+			t.Fatalf("compactClaudeHandoffContextWithLimit() error = %v", compactErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for recursively split compactor chunks")
+	}
+	if got := callbackMax.Load(); got > 1 {
+		t.Fatalf("outer selected-auth callback ran concurrently: max active = %d", got)
 	}
 }
 
