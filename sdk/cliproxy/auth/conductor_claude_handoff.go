@@ -709,6 +709,7 @@ func (m *Manager) compactClaudeHandoffContextWithLimit(ctx context.Context, orig
 					firstErr = errCompact
 				}
 				errMu.Unlock()
+				cancel()
 				return
 			}
 			summaries[index] = summary
