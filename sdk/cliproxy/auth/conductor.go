@@ -218,9 +218,10 @@ type Manager struct {
 	authMutationLocks sync.Map
 	// claudeHandoffMu protects compacted summaries that are applied to subsequent
 	// Claude requests for the same logical session.
-	claudeHandoffMu     sync.RWMutex
-	claudeHandoffStates map[string]claudeHandoffState
-	claudeHandoffLocks  sync.Map
+	claudeHandoffMu       sync.RWMutex
+	claudeHandoffStates   map[string]claudeHandoffState
+	claudeHandoffLocks    sync.Map
+	claudeHandoffLastSeen map[string]time.Time
 	// authLoadGate allows concurrent credential transactions, but excludes whole-store reloads.
 	// Mutations acquire one permit; Load acquires all permits before reading the store.
 	authLoadGate *semaphore.Weighted
@@ -248,6 +249,7 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 		providerOffsets:       make(map[string]int),
 		modelPoolOffsets:      make(map[string]int),
 		claudeHandoffStates:   make(map[string]claudeHandoffState),
+		claudeHandoffLastSeen: make(map[string]time.Time),
 	}
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})

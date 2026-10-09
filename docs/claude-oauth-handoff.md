@@ -45,7 +45,11 @@ Claude account after a failed compaction. Set `fail-open: true` only if losing
 the request is worse than paying for the full context.
 
 Claude handoff state is keyed by the normalized session/conversation ID already
-extracted by CLIProxyAPI. It is kept for 24 hours. A later quota in the same
-session compacts the current handoff envelope again, so repeated account
-rotation does not grow the transcript without bound. The mechanism runs in the
-local conductor path; Home dispatch mode does not currently run this hook.
+extracted by CLIProxyAPI. After a proxy restart, the first request that already
+contains conversation history is compacted before the first Claude account is
+used. During a running session, a historical request received after at least
+30 minutes of inactivity is compacted again. State is kept for 24 hours. A
+later quota in the same session compacts the current Claude handoff envelope
+again, so repeated account rotation does not grow the transcript without bound.
+The mechanism runs in the local conductor path; Home dispatch mode does not
+currently run this hook.

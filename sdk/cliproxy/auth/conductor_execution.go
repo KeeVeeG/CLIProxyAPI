@@ -127,6 +127,11 @@ func (m *Manager) Execute(ctx context.Context, providers []string, req cliproxye
 		return cliproxyexecutor.Response{}, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	req, opts = m.applyClaudeHandoffState(req, opts, normalized)
+	var errClaudeHandoffStartup error
+	req, opts, errClaudeHandoffStartup = m.maybeCompactClaudeHandoffHistory(ctx, req, opts, normalized)
+	if errClaudeHandoffStartup != nil {
+		return cliproxyexecutor.Response{}, errClaudeHandoffStartup
+	}
 	if m.HomeEnabled() {
 		resp, errHome := m.executeHome(ctx, normalized, req, opts, false)
 		return resp, unwrapExecutionBoundaryError(errHome)
@@ -246,6 +251,11 @@ func (m *Manager) ExecuteStream(ctx context.Context, providers []string, req cli
 		return nil, &Error{Code: "provider_not_found", Message: "no provider supplied"}
 	}
 	req, opts = m.applyClaudeHandoffState(req, opts, normalized)
+	var errClaudeHandoffStartup error
+	req, opts, errClaudeHandoffStartup = m.maybeCompactClaudeHandoffHistory(ctx, req, opts, normalized)
+	if errClaudeHandoffStartup != nil {
+		return nil, errClaudeHandoffStartup
+	}
 
 	defaultRequestRetry, maxRetryCredentials, maxWait := m.retrySettings()
 

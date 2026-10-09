@@ -171,6 +171,8 @@ routing:
   # the compacted transcript to the next Claude credential. The feature is
   # opt-in and fail-closed by default so a failed compaction never silently
   # sends the full transcript to another account.
+  # The first historical request after a proxy restart and a historical request
+  # after 30 minutes of inactivity are compacted before Claude selection.
   claude-handoff:
     enabled: false
     compactor-provider: "codex"

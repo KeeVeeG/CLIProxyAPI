@@ -23,6 +23,7 @@ const (
 	claudeHandoffInternalMetadataKey = "cliproxy.claude_handoff.internal"
 	claudeHandoffSummaryTag          = "<cli-proxy-claude-handoff>"
 	claudeHandoffSummaryEndTag       = "</cli-proxy-claude-handoff>"
+	claudeHandoffIdleCompactAfter    = 30 * time.Minute
 )
 
 type claudeHandoffState struct {
@@ -111,6 +112,34 @@ func (m *Manager) claudeHandoffSessionLock(sessionID string) *sync.Mutex {
 	}
 	value, _ := m.claudeHandoffLocks.LoadOrStore(sessionID, &sync.Mutex{})
 	return value.(*sync.Mutex)
+}
+
+func (m *Manager) claudeHandoffLastRequest(sessionID string) (time.Time, bool) {
+	if m == nil || sessionID == "" {
+		return time.Time{}, false
+	}
+	m.claudeHandoffMu.RLock()
+	lastSeen, ok := m.claudeHandoffLastSeen[sessionID]
+	m.claudeHandoffMu.RUnlock()
+	if ok && !lastSeen.IsZero() && time.Since(lastSeen) > 24*time.Hour {
+		m.claudeHandoffMu.Lock()
+		delete(m.claudeHandoffLastSeen, sessionID)
+		m.claudeHandoffMu.Unlock()
+		return time.Time{}, false
+	}
+	return lastSeen, ok
+}
+
+func (m *Manager) rememberClaudeHandoffRequest(sessionID string, at time.Time) {
+	if m == nil || sessionID == "" {
+		return
+	}
+	m.claudeHandoffMu.Lock()
+	if m.claudeHandoffLastSeen == nil {
+		m.claudeHandoffLastSeen = make(map[string]time.Time)
+	}
+	m.claudeHandoffLastSeen[sessionID] = at
+	m.claudeHandoffMu.Unlock()
 }
 
 func (m *Manager) rememberClaudeHandoffSummary(sessionID, summary string) {
@@ -257,6 +286,9 @@ func (m *Manager) applyClaudeHandoffState(req cliproxyexecutor.Request, opts cli
 	if !cfg.Enabled || claudeHandoffInternal(opts) || opts.SourceFormat.String() != "claude" || !containsProvider(providers, "claude") {
 		return req, opts
 	}
+	metadata := cloneSchedulerAnyMap(opts.Metadata)
+	metadata = ensureCanonicalSessionMetadata(metadata, opts.Headers, req.Payload)
+	opts.Metadata = metadata
 	sessionID := claudeHandoffSessionID(opts)
 	state, ok := claudeHandoffSummaryFromState(m, sessionID)
 	if !ok || isAlreadyClaudeHandoffCompacted(req.Payload) {
@@ -269,6 +301,51 @@ func (m *Manager) applyClaudeHandoffState(req cliproxyexecutor.Request, opts cli
 	req.Payload = rewritten
 	opts.OriginalRequest = bytes.Clone(rewritten)
 	return req, opts
+}
+
+// maybeCompactClaudeHandoffHistory protects the first request after a process
+// restart. The in-memory summary map is empty after restart, so an already
+// large Claude transcript would otherwise be sent uncompressed to the first
+// credential. A session with more than one message is treated as historical;
+// the resulting state prevents repeated compaction on subsequent requests.
+func (m *Manager) maybeCompactClaudeHandoffHistory(ctx context.Context, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, providers []string) (cliproxyexecutor.Request, cliproxyexecutor.Options, error) {
+	cfg := claudeHandoffConfig(m.runtimeConfigSnapshot())
+	if m == nil || m.HomeEnabled() || !cfg.Enabled || claudeHandoffInternal(opts) || opts.SourceFormat.String() != "claude" || !containsProvider(providers, "claude") {
+		return req, opts, nil
+	}
+	messages := gjson.GetBytes(req.Payload, "messages")
+	if !messages.IsArray() || len(messages.Array()) <= 1 {
+		return req, opts, nil
+	}
+	metadata := cloneSchedulerAnyMap(opts.Metadata)
+	metadata = ensureCanonicalSessionMetadata(metadata, opts.Headers, req.Payload)
+	opts.Metadata = metadata
+	sessionID := claudeHandoffSessionID(opts)
+	if sessionID == "" {
+		return req, opts, nil
+	}
+	lastRequest, hadLastRequest := m.claudeHandoffLastRequest(sessionID)
+	idle := hadLastRequest && !lastRequest.IsZero() && time.Since(lastRequest) >= claudeHandoffIdleCompactAfter
+	m.rememberClaudeHandoffRequest(sessionID, time.Now())
+	if isAlreadyClaudeHandoffCompacted(req.Payload) && !idle {
+		return req, opts, nil
+	}
+	if _, ok := claudeHandoffSummaryFromState(m, sessionID); ok && !idle {
+		return req, opts, nil
+	}
+	if len(opts.OriginalRequest) == 0 {
+		opts.OriginalRequest = bytes.Clone(req.Payload)
+	}
+	compacted, errCompact := m.performClaudeHandoff(ctx, req, opts, fmt.Errorf("historical Claude request after proxy restart"))
+	if errCompact != nil {
+		if cfg.FailOpen {
+			return req, opts, nil
+		}
+		return req, opts, errCompact
+	}
+	req.Payload = compacted
+	opts.OriginalRequest = bytes.Clone(compacted)
+	return req, opts, nil
 }
 
 func isAlreadyClaudeHandoffCompacted(payload []byte) bool {

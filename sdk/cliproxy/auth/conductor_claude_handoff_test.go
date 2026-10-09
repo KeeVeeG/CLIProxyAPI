@@ -509,6 +509,65 @@ func TestExecuteClaudeQuotaCompactsBeforeSelectingNextOAuthAccount(t *testing.T)
 	}
 }
 
+func TestMaybeCompactClaudeHandoffHistoryOnFirstRequest(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&claudeHandoffFlowCompactorExecutor{})
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
+		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6.1-sol", KeepRecentMessages: 2,
+	}}})
+	const authID = "claude-startup-compactor-auth"
+	const model = "gpt-6.1-sol"
+	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: model}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+	if _, err := manager.Register(context.Background(), &Auth{ID: authID, Provider: "codex", Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	payload := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"old request"},{"role":"assistant","content":"old answer"},{"role":"user","content":"latest request"}]}`)
+	req, opts, err := manager.maybeCompactClaudeHandoffHistory(context.Background(), cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
+		SourceFormat:    sdktranslator.FormatClaude,
+		OriginalRequest: payload,
+		Metadata: map[string]any{
+			cliproxyexecutor.CanonicalSessionIDMetadataKey: "claude-startup-history-session",
+		},
+	}, []string{"claude"})
+	if err != nil {
+		t.Fatalf("maybeCompactClaudeHandoffHistory() error = %v", err)
+	}
+	if !isAlreadyClaudeHandoffCompacted(req.Payload) || !isAlreadyClaudeHandoffCompacted(opts.OriginalRequest) {
+		t.Fatalf("historical request was not compacted: payload=%s original=%s", req.Payload, opts.OriginalRequest)
+	}
+}
+
+func TestMaybeCompactClaudeHandoffHistoryAfterThirtyMinutesIdle(t *testing.T) {
+	manager := NewManager(nil, nil, nil)
+	manager.RegisterExecutor(&claudeHandoffFlowCompactorExecutor{})
+	manager.SetConfig(&internalconfig.Config{Routing: internalconfig.RoutingConfig{ClaudeHandoff: internalconfig.ClaudeHandoffConfig{
+		Enabled: true, CompactorProvider: "codex", CompactorModel: "gpt-6.1-sol", KeepRecentMessages: 2,
+	}}})
+	const authID = "claude-idle-compactor-auth"
+	registry.GetGlobalRegistry().RegisterClient(authID, "codex", []*registry.ModelInfo{{ID: "gpt-6.1-sol"}})
+	t.Cleanup(func() { registry.GetGlobalRegistry().UnregisterClient(authID) })
+	if _, err := manager.Register(context.Background(), &Auth{ID: authID, Provider: "codex", Status: StatusActive, Metadata: map[string]any{"disable_cooling": true}}); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	const sessionID = "claude-idle-history-session"
+	manager.rememberClaudeHandoffSummary(sessionID, `{"goal":"old summary"}`)
+	manager.rememberClaudeHandoffRequest(sessionID, time.Now().Add(-31*time.Minute))
+	payload := []byte(`{"model":"claude-opus-5-5","messages":[{"role":"user","content":"old request"},{"role":"assistant","content":"old answer"},{"role":"user","content":"latest request"}]}`)
+	req, _, err := manager.maybeCompactClaudeHandoffHistory(context.Background(), cliproxyexecutor.Request{Model: "claude-opus-5-5", Payload: payload}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatClaude,
+		Metadata: map[string]any{
+			cliproxyexecutor.CanonicalSessionIDMetadataKey: sessionID,
+		},
+	}, []string{"claude"})
+	if err != nil {
+		t.Fatalf("maybeCompactClaudeHandoffHistory() error = %v", err)
+	}
+	if !isAlreadyClaudeHandoffCompacted(req.Payload) {
+		t.Fatalf("idle Claude session was not compacted: %s", req.Payload)
+	}
+}
+
 func TestExecuteStreamClaudeQuotaCompactsBootstrapErrorBeforeNextOAuthAccount(t *testing.T) {
 	manager := NewManager(nil, claudeHandoffFlowSelector{}, nil)
 	manager.SetRetryConfig(0, 0, 0)
